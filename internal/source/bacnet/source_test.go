@@ -352,3 +352,72 @@ func TestParseID(t *testing.T) {
 		}
 	}
 }
+
+// A device the store held is known again after a restart: one listed by
+// address is read again at once, and keeps what was read of it.
+func TestRestore(t *testing.T) {
+	network, err := sim.Start()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(network.Close)
+	nowhere := client.Config{
+		Local:     netip.MustParseAddrPort("127.0.0.1:0"),
+		Broadcast: netip.MustParseAddrPort("127.0.0.1:9"),
+		Timeout:   time.Second,
+	}
+
+	// The first run lists a device by address.
+	s1 := New(Options{Timeout: time.Second})
+	if err := s1.use("test", nowhere); err != nil {
+		t.Fatal(err)
+	}
+	stations := network.Addrs()
+	added, err := s1.Add(context.Background(), explorer.Values{"address": stations[3].String()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the device to be named", func() bool {
+		s1.mu.Lock()
+		defer s1.mu.Unlock()
+		return s1.devices[4000].name != ""
+	})
+	s1.mu.Lock()
+	saved := s1.deviceNode(4000, s1.devices[4000])
+	s1.mu.Unlock()
+	s1.Close()
+	if len(saved.Native) == 0 {
+		t.Fatal("the device node carries nothing to restore it from")
+	}
+
+	// The second run is handed the node and reads the device again without
+	// a Who-Is.
+	s2 := New(Options{Timeout: time.Second})
+	if err := s2.use("test", nowhere); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s2.Close() })
+	if err := s2.Restore(context.Background(), []explorer.Node{saved, added}); err != nil {
+		t.Fatal(err)
+	}
+	s2.mu.Lock()
+	d := s2.devices[4000]
+	s2.mu.Unlock()
+	if d == nil || d.name != "BOILER-1" || !d.added || d.dev.Addr.IP != stations[3] {
+		t.Fatalf("restored %+v, want BOILER-1 at %v, listed by address", d, stations[3])
+	}
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case e := <-s2.events:
+			if n, ok := e.Data.(explorer.Node); ok && n.ID == devID(4000) {
+				if n.Label != "BOILER-1" || fact(n, "Model") != "SIM-LEGACY" {
+					t.Errorf("after contact the device is %+v", n)
+				}
+				return
+			}
+		case <-deadline:
+			t.Fatal("the restored device was not read again")
+		}
+	}
+}

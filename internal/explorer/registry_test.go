@@ -2,7 +2,9 @@ package explorer
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -14,7 +16,8 @@ type fake struct {
 	children map[NodeID][]Node
 	// nodes is what the fake has announced or added, so that it can say a
 	// node's children are read.
-	nodes map[NodeID]Node
+	nodes    map[NodeID]Node
+	restored []Node
 }
 
 func newFake() *fake {
@@ -26,7 +29,14 @@ func (f *fake) Describe() Description {
 }
 func (f *fake) Open(ctx context.Context, settings Values) error { f.open = true; return nil }
 func (f *fake) Close() error                                    { f.open = false; return nil }
-func (f *fake) Discover(ctx context.Context) error              { return ErrNotSupported }
+func (f *fake) Restore(ctx context.Context, nodes []Node) error {
+	for _, n := range nodes {
+		f.nodes[n.ID] = n
+	}
+	f.restored = append(f.restored, nodes...)
+	return nil
+}
+func (f *fake) Discover(ctx context.Context) error { return ErrNotSupported }
 func (f *fake) Add(ctx context.Context, form Values) (Node, error) {
 	n := Node{ID: NodeID("fake:" + form["name"]), Kind: KindDevice, Label: form["name"], Children: ChildrenState{State: ChildrenUnknown}}
 	f.nodes[n.ID] = n
@@ -151,7 +161,7 @@ func TestRegistry(t *testing.T) {
 		t.Errorf("read %+v, %v", readings, err)
 	}
 
-	// Closing forgets everything.
+	// Closing forgets everything, there being no store.
 	reg.Close("fake")
 	next(t, events, "reset")
 	if n := len(reg.Nodes()); n != 0 {
@@ -160,4 +170,115 @@ func TestRegistry(t *testing.T) {
 	if _, _, err := reg.Children(added.ID, false); !errors.Is(err, ErrUnknownNode) {
 		t.Errorf("children of a forgotten node gave %v", err)
 	}
+}
+
+// With a store, what is found goes to the temp file, a decision moves it to
+// a new registry file, and a new registry starts from both, unreached,
+// handing the source what it held.
+func TestRegistryStore(t *testing.T) {
+	dir := t.TempDir()
+	st, err := OpenStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+
+	reg := New()
+	reg.flushAfter = 20 * time.Millisecond
+	if err := reg.UseStore(st); err != nil {
+		t.Fatal(err)
+	}
+	f := newFake()
+	reg.Register(f)
+	if err := reg.Open(ctx, "fake", nil); err != nil {
+		t.Fatal(err)
+	}
+	dev, _ := reg.Add(ctx, "fake", Values{"name": "d"})
+	f.children[dev.ID] = []Node{
+		{ID: "fake:d/1", Kind: KindPoint, Label: "p1", Native: []byte(`{"reg":1}`)},
+		{ID: "fake:d/2", Kind: KindPoint, Label: "p2"},
+	}
+	reg.Children(dev.ID, false)
+	waitUntil(t, "the points", func() bool { n, ok := reg.Node("fake:d/2"); return ok && n.Track == TrackNew && n.Reached })
+	reg.Flush()
+	registry, temp, err := st.Load()
+	if err != nil || len(registry) != 0 || len(temp) != 3 {
+		t.Fatalf("after discovery the store holds %d registry and %d temp nodes, %v; want 0 and 3", len(registry), len(temp), err)
+	}
+
+	// A decision.
+	decided, err := reg.Classify([]NodeID{"fake:d/1"}, TrackTracked)
+	if err != nil || len(decided) != 1 || decided[0].Track != TrackTracked {
+		t.Fatalf("classify gave %+v, %v", decided, err)
+	}
+	if _, err := reg.Classify([]NodeID{dev.ID}, TrackSidelined); err == nil {
+		t.Error("a device was classified")
+	}
+	reg.Flush()
+	registry, temp, err = st.Load()
+	if err != nil || len(registry) != 2 || len(temp) != 2 {
+		t.Fatalf("after a decision the store holds %d registry and %d temp nodes, %v; want the point with its device, and the device with the other point", len(registry), len(temp), err)
+	}
+	if info := st.Info(); info.Registries != 1 || info.Latest == "" {
+		t.Errorf("store info %+v", info)
+	}
+
+	// A list that no longer has a decided point keeps it, unreached.
+	f.children[dev.ID] = []Node{{ID: "fake:d/2", Kind: KindPoint, Label: "p2"}}
+	reg.Children(dev.ID, true)
+	waitUntil(t, "the second list", func() bool { n, ok := reg.Node("fake:d/1"); return ok && !n.Reached })
+	if n, _ := reg.Node("fake:d/1"); n.Track != TrackTracked || !sameJSON(n.Native, `{"reg":1}`) {
+		t.Errorf("the decided point is %+v after the list dropped it", n)
+	}
+	reg.CloseAll()
+
+	// A new run.
+	reg2 := New()
+	if err := reg2.UseStore(st); err != nil {
+		t.Fatal(err)
+	}
+	nodes := reg2.Nodes()
+	if len(nodes) != 3 {
+		t.Fatalf("a new registry loaded %d nodes, want 3", len(nodes))
+	}
+	for _, n := range nodes {
+		if n.Reached {
+			t.Errorf("%s is reached before any source is open", n.ID)
+		}
+	}
+	if n, _ := reg2.Node("fake:d/1"); n.Track != TrackTracked || n.Source != "fake" {
+		t.Errorf("loaded %+v, want the tracked point", n)
+	}
+	f2 := newFake()
+	reg2.Register(f2)
+	if err := reg2.Open(ctx, "fake", nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(f2.restored) != 3 {
+		t.Errorf("the source was handed %d nodes, want 3", len(f2.restored))
+	}
+	// The source speaks of the device: it is reached, and keeps its decision
+	// and native data though the source sent neither.
+	f2.events <- Event{Type: "node", Data: Node{ID: "fake:d/1", Parent: dev.ID, Kind: KindPoint, Label: "p1 again"}}
+	waitUntil(t, "the point to be reached", func() bool { n, _ := reg2.Node("fake:d/1"); return n.Reached })
+	if n, _ := reg2.Node("fake:d/1"); n.Track != TrackTracked || !sameJSON(n.Native, `{"reg":1}`) || n.Label != "p1 again" {
+		t.Errorf("after contact the point is %+v", n)
+	}
+	reg2.CloseAll()
+}
+
+func waitUntil(t *testing.T, what string, done func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for !done() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func sameJSON(a []byte, b string) bool {
+	var x, y any
+	return json.Unmarshal(a, &x) == nil && json.Unmarshal([]byte(b), &y) == nil && fmt.Sprint(x) == fmt.Sprint(y)
 }

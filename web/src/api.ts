@@ -5,6 +5,9 @@ export type NodeID = string
 export type Kind = 'device' | 'group' | 'point'
 export type Family = 'analog' | 'binary' | 'multistate' | 'text' | 'other'
 export type Quality = 'good' | 'stale' | 'comm-fail' | 'error'
+// The admin's decision about a point: new until decided, then tracked or
+// sidelined. The explorer shows every point either way.
+export type Track = 'new' | 'tracked' | 'sidelined'
 
 export interface Fact {
   label: string
@@ -43,6 +46,10 @@ export interface Node {
   facts?: Fact[]
   reading?: Reading
   children: ChildrenState
+  track?: Track
+  // Set once a source has heard from or read the node in this run. A node
+  // loaded from the store starts unreached.
+  reached: boolean
   listed?: boolean
   pending?: boolean
   error?: string
@@ -105,6 +112,12 @@ export interface Source {
 
 export type Values = Record<string, string>
 
+export interface StoreInfo {
+  dir: string
+  latest?: string
+  registries: number
+}
+
 async function request<T>(path: string, body?: unknown, method?: string): Promise<T> {
   const res = await fetch(path, {
     method: method ?? (body === undefined ? 'GET' : 'POST'),
@@ -136,4 +149,6 @@ export const api = {
   children: (id: NodeID) => request<ChildrenList>(withID('/api/node/children', id)),
   refresh: (id: NodeID) => request<ChildrenList>(withID('/api/node/refresh', id), {}),
   detail: (id: NodeID) => request<Detail>(withID('/api/node/detail', id)),
+  store: () => request<StoreInfo>('/api/store'),
+  classify: (ids: NodeID[], track: Track) => request<Node[]>('/api/classify', { ids, track }),
 }

@@ -476,6 +476,109 @@ ol {
   color: var(--muted);
 }
 
+/* The admin's decision about a point, and whether it has answered. */
+.flag.track-new {
+  color: #0b62c4;
+  background: color-mix(in srgb, #0b62c4 12%, transparent);
+}
+
+.flag.track-tracked {
+  color: #157347;
+  background: color-mix(in srgb, #157347 12%, transparent);
+}
+
+.flag.track-sidelined {
+  color: var(--muted);
+  background: var(--hover);
+}
+
+.flag.unreached {
+  color: var(--muted);
+  background: var(--hover);
+  font-style: italic;
+}
+
+.row.unreached .label,
+.row.unreached .value {
+  color: var(--muted);
+}
+
+.row.track-sidelined .label {
+  color: var(--muted);
+}
+
+.row.track-tracked {
+  box-shadow: inset 3px 0 0 #157347;
+}
+
+/* The admin panel. */
+.admin {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.admin-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--line);
+  flex-wrap: wrap;
+}
+
+.admin-bar .tab {
+  font: inherit;
+  color: var(--muted);
+  background: none;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  padding: 4px 2px;
+  cursor: pointer;
+}
+
+.admin-bar .tab.active {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+
+.admin-list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 0 0 24px;
+}
+
+.admin-list table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.admin-list th,
+.admin-list td {
+  text-align: left;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--line);
+  vertical-align: middle;
+}
+
+.admin-list tr.device-head td {
+  background: var(--panel);
+  font-weight: 600;
+}
+
+.admin-list td.num {
+  text-align: right;
+}
+
+.admin-foot {
+  padding: 8px 16px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 /* The add-by-address form in the header bar. */
 .add-device {
   display: flex;

@@ -48,7 +48,8 @@ export function useLive(onReset: () => void): boolean {
       void qc.invalidateQueries({ queryKey: ['sources'] })
     })
     es.addEventListener('reset', () => {
-      qc.setQueryData<Nodes>(nodesKey, new Map())
+      // A source started over. The server follows with the nodes it keeps,
+      // unreached, so only what was read of them is stale.
       qc.removeQueries({ queryKey: ['rev'] })
       qc.removeQueries({ queryKey: ['detail'] })
       void qc.invalidateQueries({ queryKey: ['sources'] })

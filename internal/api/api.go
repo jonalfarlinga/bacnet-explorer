@@ -145,6 +145,38 @@ func New(cfg Config) http.Handler {
 		reply(w, d)
 	})
 
+	// ---- the registry of decisions ----
+
+	mux.HandleFunc("GET /api/store", func(w http.ResponseWriter, r *http.Request) {
+		info, ok := reg.StoreInfo()
+		if !ok {
+			http.Error(w, "the explorer runs without a store", http.StatusNotFound)
+			return
+		}
+		reply(w, info)
+	})
+
+	// Records the admin's decision about some points.
+	mux.HandleFunc("POST /api/classify", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			IDs   []explorer.NodeID `json:"ids"`
+			Track explorer.Track    `json:"track"`
+		}
+		if !readJSON(w, r, &body) {
+			return
+		}
+		if len(body.IDs) == 0 || len(body.IDs) > 10000 {
+			http.Error(w, "give 1 to 10000 node ids", http.StatusBadRequest)
+			return
+		}
+		nodes, err := reg.Classify(body.IDs, body.Track)
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		reply(w, nodes)
+	})
+
 	mux.HandleFunc("GET /api/events", func(w http.ResponseWriter, r *http.Request) {
 		events(w, r, reg)
 	})

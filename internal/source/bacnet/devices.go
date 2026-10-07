@@ -2,6 +2,8 @@ package bacnet
 
 import (
 	"context"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/netip"
 	"strconv"
@@ -26,6 +28,111 @@ type device struct {
 	objs     []object
 	index    map[client.ObjectID]int
 	cancel   context.CancelFunc // ends the reading of its objects
+}
+
+// native is what a device node carries so that the source can reach and
+// show the device again after a restart, without hearing from it.
+type native struct {
+	Instance     uint32 `json:"instance"`
+	IP           string `json:"ip"`
+	Net          uint16 `json:"net,omitempty"`
+	MAC          string `json:"mac,omitempty"` // hex
+	MaxAPDU      uint16 `json:"maxApdu"`
+	Segmentation uint8  `json:"segmentation"`
+	VendorID     uint16 `json:"vendorId"`
+	Added        bool   `json:"added,omitempty"`
+
+	Name        string `json:"name,omitempty"`
+	VendorName  string `json:"vendorName,omitempty"`
+	ModelName   string `json:"modelName,omitempty"`
+	Firmware    string `json:"firmware,omitempty"`
+	Software    string `json:"software,omitempty"`
+	Location    string `json:"location,omitempty"`
+	Description string `json:"description,omitempty"`
+}
+
+func (d *device) native() native {
+	return native{
+		Instance: d.dev.Instance, IP: d.dev.Addr.IP.String(), Net: d.dev.Addr.Net, MAC: hex.EncodeToString(d.dev.Addr.MAC),
+		MaxAPDU: d.dev.MaxAPDU, Segmentation: d.dev.Segmentation, VendorID: d.dev.VendorID, Added: d.added,
+		Name: d.name, VendorName: d.vendorName, ModelName: d.modelName, Firmware: d.firmware,
+		Software: d.software, Location: d.location, Description: d.description,
+	}
+}
+
+// restore makes the device record a native describes.
+func (n native) restore() (*device, error) {
+	ip, err := netip.ParseAddrPort(n.IP)
+	if err != nil {
+		return nil, fmt.Errorf("device %d: address %q: %w", n.Instance, n.IP, err)
+	}
+	mac, err := hex.DecodeString(n.MAC)
+	if err != nil {
+		return nil, fmt.Errorf("device %d: MAC %q: %w", n.Instance, n.MAC, err)
+	}
+	if n.Net == 0 {
+		mac = nil
+	}
+	return &device{
+		dev: client.Device{
+			Instance: n.Instance, Addr: client.Address{IP: ip, Net: n.Net, MAC: mac},
+			MaxAPDU: n.MaxAPDU, Segmentation: n.Segmentation, VendorID: n.VendorID,
+		},
+		added: n.Added, identified: true,
+		name: n.Name, vendorName: n.VendorName, modelName: n.ModelName, firmware: n.Firmware,
+		software: n.Software, location: n.Location, description: n.Description,
+		children: explorer.ChildrenState{State: explorer.ChildrenUnknown},
+	}, nil
+}
+
+// Restore implements explorer.Source: devices the store held are known
+// again, by address, so that their objects can be read and their networks
+// placed. One that was listed by address is read again now, since no Who-Is
+// will reach it; the others are heard when they answer the Who-Is.
+func (s *Source) Restore(ctx context.Context, nodes []explorer.Node) error {
+	var (
+		events  []explorer.Event
+		reprobe []client.Device
+	)
+	s.mu.Lock()
+	c := s.c
+	for _, n := range nodes {
+		if n.Kind != explorer.KindDevice || len(n.Native) == 0 {
+			continue
+		}
+		var nat native
+		if err := json.Unmarshal(n.Native, &nat); err != nil {
+			continue
+		}
+		if _, known := s.devices[nat.Instance]; known {
+			continue
+		}
+		d, err := nat.restore()
+		if err != nil {
+			continue
+		}
+		s.devices[nat.Instance] = d
+		if d.dev.Addr.Routed() {
+			events = append(events, s.placeNetwork(d.dev.Addr.Net, d.dev.Addr.IP)...)
+		}
+		if d.added {
+			reprobe = append(reprobe, d.dev)
+		}
+	}
+	s.mu.Unlock()
+	for _, e := range events {
+		s.emit(e)
+	}
+	if c != nil {
+		for _, dev := range reprobe {
+			go func() {
+				if probed, err := c.Probe(ctx, dev.Addr, dev.Instance); err == nil {
+					s.record(probed, true)
+				}
+			}()
+		}
+	}
+	return nil
 }
 
 // ---- node IDs --------------------------------------------------------------
@@ -219,6 +326,9 @@ func (s *Source) deviceNode(instance uint32, d *device) explorer.Node {
 		explorer.Fact{Label: "Segmentation", Value: segmentationName(d.dev.Segmentation)},
 	)
 	n.Facts = nonEmpty(n.Facts)
+	if b, err := json.Marshal(d.native()); err == nil {
+		n.Native = b
+	}
 	return n
 }
 

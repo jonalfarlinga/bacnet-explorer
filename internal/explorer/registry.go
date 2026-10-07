@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Registry holds the sources and everything they have found. Its methods
@@ -16,6 +17,16 @@ type Registry struct {
 	order   []string // kinds, in the order registered
 	nodes   map[NodeID]*node
 	subs    map[chan Event]struct{}
+
+	// store, when set, keeps the nodes across runs. inRegistry marks the
+	// nodes that belong in the registry file: the points the admin has
+	// decided about, and their devices. Everything else that is not a
+	// group goes to the temp file, which is rewritten flushAfter the last
+	// change.
+	store      *Store
+	inRegistry map[NodeID]bool
+	flushAfter time.Duration
+	flush      *time.Timer
 }
 
 type entry struct {
@@ -39,9 +50,11 @@ type node struct {
 // New returns an empty registry.
 func New() *Registry {
 	return &Registry{
-		sources: map[string]*entry{},
-		nodes:   map[NodeID]*node{},
-		subs:    map[chan Event]struct{}{},
+		sources:    map[string]*entry{},
+		nodes:      map[NodeID]*node{},
+		subs:       map[chan Event]struct{}{},
+		inRegistry: map[NodeID]bool{},
+		flushAfter: time.Second,
 	}
 }
 
@@ -97,8 +110,144 @@ func (r *Registry) Sources() []SourceInfo {
 	return list
 }
 
-// Open starts a source with the settings given. A source that is open is
-// closed first: everything it had found is gone.
+// ---- the store -------------------------------------------------------------
+
+// UseStore loads what the store holds and keeps the registry in it from
+// then on. The nodes loaded start unreached, and are handed to each source
+// when it opens. It is called before any source is open.
+func (r *Registry) UseStore(st *Store) error {
+	registry, temp, err := st.Load()
+	if err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.store = st
+	for _, n := range registry {
+		kind, _, _ := strings.Cut(string(n.ID), ":")
+		r.upsert(kind, n, false)
+		r.inRegistry[n.ID] = true
+	}
+	for _, n := range temp {
+		kind, _, _ := strings.Cut(string(n.ID), ":")
+		if _, known := r.nodes[n.ID]; !known {
+			r.upsert(kind, n, false)
+		}
+	}
+	return nil
+}
+
+// StoreInfo describes the store, and false when there is none.
+func (r *Registry) StoreInfo() (StoreInfo, bool) {
+	r.mu.Lock()
+	st := r.store
+	r.mu.Unlock()
+	if st == nil {
+		return StoreInfo{}, false
+	}
+	return st.Info(), true
+}
+
+// markDirty schedules a rewrite of the temp file. The caller holds r.mu.
+func (r *Registry) markDirty() {
+	if r.store == nil {
+		return
+	}
+	if r.flush == nil {
+		r.flush = time.AfterFunc(r.flushAfter, r.writeTemp)
+	} else {
+		r.flush.Reset(r.flushAfter)
+	}
+}
+
+// writeTemp writes everything that is not in the registry file, and not a
+// group, to the temp file, with the devices those nodes are under, so that
+// the file stands on its own.
+func (r *Registry) writeTemp() {
+	r.mu.Lock()
+	st := r.store
+	include := map[NodeID]bool{}
+	for id, n := range r.nodes {
+		if n.Kind == KindGroup || r.inRegistry[id] {
+			continue
+		}
+		include[id] = true
+		for p := r.nodes[n.Parent]; p != nil; p = r.nodes[p.Parent] {
+			if p.Kind == KindDevice {
+				include[p.ID] = true
+			}
+		}
+	}
+	nodes := make([]Node, 0, len(include))
+	for id := range include {
+		nodes = append(nodes, r.nodes[id].Node)
+	}
+	r.mu.Unlock()
+	if st == nil {
+		return
+	}
+	sortNodes(nodes)
+	st.WriteTemp(nodes)
+}
+
+// Flush writes the temp file now, instead of after the usual delay.
+func (r *Registry) Flush() {
+	r.mu.Lock()
+	if r.flush != nil {
+		r.flush.Stop()
+	}
+	r.mu.Unlock()
+	r.writeTemp()
+}
+
+// Classify records the admin's decision about some points, and writes the
+// registry file anew with every decision so far. The points' devices go
+// into it with them. It returns the points as they now are.
+func (r *Registry) Classify(ids []NodeID, track Track) ([]Node, error) {
+	if track != TrackTracked && track != TrackSidelined {
+		return nil, fmt.Errorf("a point can be tracked or sidelined, not %q", track)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []Node
+	for _, id := range ids {
+		n := r.nodes[id]
+		if n == nil {
+			return nil, fmt.Errorf("%w: %s", ErrUnknownNode, id)
+		}
+		if n.Kind != KindPoint {
+			return nil, fmt.Errorf("%s is not a point", id)
+		}
+		n.Track = track
+		r.inRegistry[id] = true
+		for p := r.nodes[n.Parent]; p != nil; p = r.nodes[p.Parent] {
+			if p.Kind == KindDevice {
+				r.inRegistry[p.ID] = true
+			}
+		}
+		out = append(out, n.Node)
+		r.publish(Event{Type: "node", Data: n.Node})
+	}
+	if r.store != nil {
+		var keep []Node
+		for id, n := range r.nodes {
+			if r.inRegistry[id] {
+				keep = append(keep, n.Node)
+			}
+		}
+		sortNodes(keep)
+		if _, err := r.store.WriteRegistry(keep); err != nil {
+			return nil, err
+		}
+		r.markDirty()
+	}
+	return out, nil
+}
+
+// ---- sources ---------------------------------------------------------------
+
+// Open starts a source with the settings given, and hands it what the store
+// holds of its nodes. A source that is open is closed first.
 func (r *Registry) Open(ctx context.Context, kind string, settings Values) error {
 	e, err := r.entry(kind)
 	if err != nil {
@@ -112,15 +261,28 @@ func (r *Registry) Open(ctx context.Context, kind string, settings Values) error
 	e.open = true
 	e.ctx, e.stop = context.WithCancel(context.Background())
 	e.pumpDone = make(chan struct{})
+	var restore []Node
+	for _, n := range r.nodes {
+		if n.Source == kind && n.Kind != KindGroup {
+			restore = append(restore, n.Node)
+		}
+	}
 	r.mu.Unlock()
 	go r.pump(kind, e)
+	if len(restore) > 0 {
+		sortNodes(restore)
+		if err := e.src.Restore(e.ctx, restore); err != nil {
+			return err
+		}
+	}
 	r.mu.Lock()
 	r.publish(Event{Type: "source", Data: SourceInfo{Description: e.src.Describe(), Status: e.src.Status()}})
 	r.mu.Unlock()
 	return nil
 }
 
-// Close stops a source. Everything it had found is gone.
+// Close stops a source. What it found stays listed, unreached, if there is
+// a store; otherwise it is gone.
 func (r *Registry) Close(kind string) error {
 	e, err := r.entry(kind)
 	if err != nil {
@@ -146,16 +308,16 @@ func (r *Registry) closeEntry(kind string, e *entry) {
 
 	r.mu.Lock()
 	r.forget(kind)
-	r.publish(Event{Type: "reset"})
 	r.publish(Event{Type: "source", Data: SourceInfo{Description: e.src.Describe(), Status: e.src.Status()}})
 	r.mu.Unlock()
 }
 
-// CloseAll stops every source.
+// CloseAll stops every source and writes the temp file.
 func (r *Registry) CloseAll() {
 	for _, info := range r.Sources() {
 		r.Close(info.Kind)
 	}
+	r.Flush()
 }
 
 // pump takes a source's events into the registry until the source is
@@ -173,7 +335,8 @@ func (r *Registry) pump(kind string, e *entry) {
 	}
 }
 
-// take applies one event from a source and passes it on.
+// take applies one event from a source and passes it on. A node a source
+// speaks of has been reached.
 func (r *Registry) take(kind string, e *entry, ev Event) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -183,7 +346,7 @@ func (r *Registry) take(kind string, e *entry, ev Event) {
 		if !ok {
 			return
 		}
-		r.upsert(kind, n)
+		r.upsert(kind, n, true)
 		r.publish(Event{Type: "node", Data: r.nodes[n.ID].Node})
 	case "children":
 		ce, ok := ev.Data.(ChildrenEvent)
@@ -200,7 +363,8 @@ func (r *Registry) take(kind string, e *entry, ev Event) {
 		for i := range ce.Nodes {
 			ce.Nodes[i].Parent = ce.Parent
 			ce.Nodes[i].Listed = true
-			r.upsert(kind, ce.Nodes[i])
+			r.upsert(kind, ce.Nodes[i], true)
+			ce.Nodes[i] = r.nodes[ce.Nodes[i].ID].Node
 		}
 		parent.rev++
 		ce.Rev = parent.rev
@@ -214,20 +378,40 @@ func (r *Registry) take(kind string, e *entry, ev Event) {
 		}
 	case "reset":
 		r.forget(kind)
-		r.publish(Event{Type: "reset"})
 	case "source":
 		r.publish(Event{Type: "source", Data: SourceInfo{Description: e.src.Describe(), Status: e.src.Status()}})
 	}
 }
 
-// upsert stores a node, keeping the children revision of one already known.
-// The caller holds r.mu.
-func (r *Registry) upsert(kind string, n Node) {
+// upsert stores a node, keeping the children revision, the decision and
+// the native data of one already known. The caller holds r.mu.
+func (r *Registry) upsert(kind string, n Node, reached bool) {
 	n.Source = kind
+	n.Reached = reached
 	if n.Children.State == "" {
 		n.Children.State = ChildrenNone
 	}
-	if old := r.nodes[n.ID]; old != nil {
+	old := r.nodes[n.ID]
+	if old != nil {
+		if n.Track == "" {
+			n.Track = old.Track
+		}
+		if n.Native == nil {
+			n.Native = old.Native
+		}
+		if !reached && old.Reached {
+			n.Reached = true
+		}
+	}
+	if n.Kind == KindPoint && n.Track == "" {
+		n.Track = TrackNew
+	}
+	if n.Kind != KindGroup {
+		if old == nil || old.Track != n.Track || old.Label != n.Label || old.Parent != n.Parent || string(old.Native) != string(n.Native) {
+			r.markDirty()
+		}
+	}
+	if old != nil {
 		old.Node = n
 		return
 	}
@@ -236,23 +420,41 @@ func (r *Registry) upsert(kind string, n Node) {
 
 // dropChildren removes what is under a node, with everything under that:
 // only the children that came in a list, with listedOnly, or every child.
-// The caller holds r.mu.
+// A point the admin has decided about is never dropped by a list that no
+// longer has it: it stays, unreached, for the admin to see. The caller
+// holds r.mu.
 func (r *Registry) dropChildren(parent NodeID, listedOnly bool) {
 	for id, n := range r.nodes {
-		if n.Parent == parent && (n.Listed || !listedOnly) {
-			r.dropChildren(id, false)
-			delete(r.nodes, id)
+		if n.Parent != parent || (listedOnly && !n.Listed) {
+			continue
 		}
+		if listedOnly && (n.Track == TrackTracked || n.Track == TrackSidelined) {
+			n.Reached = false
+			r.publish(Event{Type: "node", Data: n.Node})
+			continue
+		}
+		r.dropChildren(id, false)
+		delete(r.nodes, id)
 	}
 }
 
-// forget removes everything a source found. The caller holds r.mu.
+// forget marks everything a source found as unreached, and drops its
+// groups, which the source makes again. Without a store the nodes go too:
+// there is nothing to bring them back. Subscribers get the list anew. The
+// caller holds r.mu.
 func (r *Registry) forget(kind string) {
 	for id, n := range r.nodes {
-		if n.Source == kind {
-			delete(r.nodes, id)
+		if n.Source != kind {
+			continue
 		}
+		if n.Kind == KindGroup || r.store == nil {
+			delete(r.nodes, id)
+			continue
+		}
+		n.Reached = false
 	}
+	r.publish(Event{Type: "reset"})
+	r.publish(Event{Type: "nodes", Data: r.nodesLocked()})
 }
 
 // ---- reading ---------------------------------------------------------------
@@ -278,7 +480,7 @@ func (r *Registry) Add(ctx context.Context, kind string, form Values) (Node, err
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.upsert(kind, n)
+	r.upsert(kind, n, true)
 	stored := r.nodes[n.ID].Node
 	r.publish(Event{Type: "node", Data: stored})
 	return stored, nil

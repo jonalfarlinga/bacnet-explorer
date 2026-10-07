@@ -196,7 +196,19 @@ Checked against explorer-spec §6: the `devices` and `objects` tables become one
 
 Steps 1 and 2 are independent of each other. Step 4 is chosen over SNMP or a vendor API because it is the protocol most likely on the same sites, has a small Go surface (a few hundred lines over `net`), and is the hardest fit for a model born from BACnet: a Modbus device has no self-description, so everything the tree shows about it comes from configuration. If the model carries that cleanly, it carries anything.
 
-## 6. Decisions to make
+## 6. Persistence: the store and the registry of decisions
+
+Built on 2026-10-07, in the core, since a decision about a point is the same whatever its protocol.
+
+- **Two files in one directory** (`-store`, default `data`). `temp.json` holds every device and point found and not decided about, rewritten a second after the last change. `registry_<datetime>.json` holds the points the admin has decided about, with their devices; every decision writes a new one with everything decided so far, so the latest is the whole registry and the older ones are its history. Both are whole-file JSON, loaded at start, in keeping with the file-based registry the project chose over a database.
+- **What a node carries for this**: `Track` (new, tracked, sidelined; points only), `Reached` (heard from or read in this run; false for anything loaded from the store), and `Native`, what the source needs to reach the node again, opaque to the core. The BACnet source puts a device's address, network, MAC, limits and the names it read in `Native`; objects need nothing beyond their ID.
+- **`Source.Restore`**: after a source opens, the registry hands it what the store holds of its nodes. The BACnet source makes its device records from `Native`, places their networks, and reads again at once any device that was listed by address, since no Who-Is will reach it. Nothing is marked reached by this; a source says so with events once it hears from a node.
+- **Start-up order**: load the latest registry, then `temp.json`, then open the sources. Everything shows at once, unreached, and comes alive as it answers.
+- **Lists and decisions**: a children list that no longer holds a decided point does not drop it; the point stays, unreached. An undecided one goes, as before.
+- **The admin panel** lists points by decision, grouped by device, and decides in batch over `POST /api/classify`. `GET /api/store` describes the store.
+- **Not persisted**: group nodes, which the source makes again from the devices; readings; children lists beyond the nodes themselves. Whether to keep a device's object list without reading it again was the open question; the answer is yes, as the points themselves, since they are what is decided about and what must show on start.
+
+## 7. Decisions to make
 
 1. **Node ID stability across a device's address change.** For BACnet the instance is the identity and the address is a fact, which is right. For Modbus the address is the identity unless the user names the unit in the register map. The register map should carry a `name` that becomes the ID, with the address as a fact, so that moving a meter to another IP keeps its history.
 2. **Where configuration lives.** Today everything is flags. With sources that need register maps and named units, a config file (one section per source) replaces most flags; the flags stay for the BACnet adapter and `-sim`. Settle the format at step 3.

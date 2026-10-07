@@ -90,7 +90,10 @@ export function Tree({ rows, selection, onSelect, onToggle }: TreeProps) {
         }
         const selected = row.key === selection
         const openable = row.kind === 'group' || row.node.children.state !== 'none'
-        const rowClass = row.kind === 'group' ? 'group' : row.node.kind === 'point' ? 'object' : row.node.kind
+        const rowClass =
+          row.kind === 'group'
+            ? 'group'
+            : `${row.node.kind === 'point' ? 'object' : row.node.kind}${row.node.track ? ` track-${row.node.track}` : ''}${row.node.reached ? '' : ' unreached'}`
         return (
           <div
             key={row.key}
@@ -180,6 +183,13 @@ function NodeRow({ node: n, count }: { node: Node; count: number }) {
       {state.state === 'loading' && <span className="spinner" aria-label="Reading" />}
       {state.state === 'ready' && n.kind !== 'group' && <span className="sub">{plural(state.total, 'item')}</span>}
       {state.state === 'error' && <span className="flag alarm">error</span>}
+      {!n.reached && n.kind !== 'group' && (
+        <span className="flag unreached" title="Known from an earlier run; nothing has been heard from it yet">
+          not responding
+        </span>
+      )}
+      {n.track && n.track !== 'new' && <span className={`flag track-${n.track}`}>{n.track}</span>}
+      {n.track === 'new' && <span className="flag track-new">new</span>}
       {n.reading?.flags?.map((f) => (
         <span key={f} className={`flag ${flagClass[f] ?? ''}`}>
           {f}

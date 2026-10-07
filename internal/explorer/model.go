@@ -7,6 +7,7 @@ package explorer
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 )
@@ -40,6 +41,19 @@ const (
 	FamilyMultiState Family = "multistate"
 	FamilyText       Family = "text"
 	FamilyOther      Family = "other"
+)
+
+// Track is the admin's decision about a point: whether the data consumers
+// get it. The explorer shows every point either way.
+type Track string
+
+const (
+	// TrackNew is a point nobody has decided about yet.
+	TrackNew Track = "new"
+	// TrackTracked is a point the data consumers get.
+	TrackTracked Track = "tracked"
+	// TrackSidelined is a point they do not get.
+	TrackSidelined Track = "sidelined"
 )
 
 // Quality says how much a reading is worth.
@@ -77,6 +91,16 @@ type Node struct {
 	// Children says whether the node has children and how far their reading
 	// has got.
 	Children ChildrenState `json:"children"`
+	// Track is the admin's decision about a point: new until decided, then
+	// tracked or sidelined. Empty for a node that is not a point.
+	Track Track `json:"track,omitempty"`
+	// Reached is set once a source has heard from or read the node in this
+	// run. A node loaded from the store starts unreached: it is what was
+	// known, not what answers.
+	Reached bool `json:"reached"`
+	// Native is what the source needs to reach the node again after a
+	// restart. It is opaque to the core, which keeps it in the store.
+	Native json.RawMessage `json:"native,omitempty"`
 	// Listed is set by the registry on a node that came in a children list,
 	// read on demand, as opposed to one the source announced on its own. A
 	// list that replaces a node's children replaces only the listed ones.
@@ -224,6 +248,11 @@ type Source interface {
 	Open(ctx context.Context, settings Values) error
 	// Close stops it. What it had found is gone.
 	Close() error
+	// Restore hands the source what the store holds of its nodes, after
+	// Open, so that it can reach them again: a device by its address, say.
+	// What the source already knows it keeps. Nothing is reached by this;
+	// the source says so, with events, once it has heard from a node.
+	Restore(ctx context.Context, nodes []Node) error
 
 	// Discover looks for devices on its own. A source that cannot returns
 	// ErrNotSupported.

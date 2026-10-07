@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
+import { Admin } from './Admin'
 import { api, type Field, type NodeID, type Source, type Values } from './api'
 import { EmptyDetail, NodeDetail } from './Detail'
 import { childrenQuery, useLive, useNodes } from './live'
@@ -32,6 +33,7 @@ export function App() {
   const [selection, setSelection] = useState<NodeID | null>(null)
   const [toggled, setToggled] = useState<ReadonlyMap<string, boolean>>(new Map())
   const [filter, setFilter] = useState('')
+  const [view, setView] = useState<'explore' | 'admin'>('explore')
 
   const connected = useLive(
     useCallback(() => {
@@ -103,13 +105,22 @@ export function App() {
         <span className="spacer" />
         {!connected && <span className="flag fault">reconnecting</span>}
         {anyOpen && <span className="sub">{plural(roots, 'device')}</span>}
+        <button
+          className={`button${view === 'admin' ? ' primary' : ''}`}
+          onClick={() => setView(view === 'admin' ? 'explore' : 'admin')}
+          title="Decide which points the data consumers get"
+        >
+          Admin
+        </button>
         {opened.map((s) => s.addForm.length > 0 && <AddNode key={`add-${s.kind}`} source={s} />)}
         {opened.map((s) => s.canDiscover && <DiscoverButton key={`scan-${s.kind}`} source={s} />)}
       </header>
 
       {sources.isError && <p className="banner error">The explorer is not answering: {sources.error.message}</p>}
 
-      {sources.data && !anyOpen ? (
+      {view === 'admin' ? (
+        <Admin nodes={nodes} onClose={() => setView('explore')} />
+      ) : sources.data && !anyOpen ? (
         <SourcePrompt
           sources={sources.data}
           busy={open.isPending ? open.variables.kind : undefined}
