@@ -108,7 +108,12 @@ func (s *Store) read(name string) ([]Node, error) {
 		return nil, fmt.Errorf("store: %s: %w", name, err)
 	}
 	for i := range f.Nodes {
-		f.Nodes[i].Reached = false
+		n := &f.Nodes[i]
+		n.Reached = false
+		// Nothing under a loaded node has been read in this run.
+		if n.Children.State != ChildrenNone && n.Children.State != "" {
+			n.Children = ChildrenState{State: ChildrenUnknown, Total: n.Children.Total}
+		}
 	}
 	return f.Nodes, nil
 }
@@ -121,13 +126,15 @@ func (s *Store) WriteTemp(nodes []Node) error {
 // WriteRegistry writes a new registry file, named by the moment, and
 // returns its name.
 func (s *Store) WriteRegistry(nodes []Node) (string, error) {
-	stamp := time.Now().Format("20060102-150405")
+	// Milliseconds, and a counter after them if need be, so that a later
+	// file always sorts later: "_" sorts after ".".
+	stamp := time.Now().Format("20060102-150405.000")
 	name := registryPrefix + stamp + registrySuffix
 	for i := 2; ; i++ {
 		if _, err := os.Stat(filepath.Join(s.dir, name)); errors.Is(err, os.ErrNotExist) {
 			break
 		}
-		name = fmt.Sprintf("%s%s-%d%s", registryPrefix, stamp, i, registrySuffix)
+		name = fmt.Sprintf("%s%s_%d%s", registryPrefix, stamp, i, registrySuffix)
 	}
 	return name, s.write(name, nodes)
 }

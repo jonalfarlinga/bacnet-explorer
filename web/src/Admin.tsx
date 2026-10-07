@@ -26,6 +26,17 @@ export function Admin({ nodes, onClose }: { nodes: Nodes; onClose: () => void })
       void qc.invalidateQueries({ queryKey: ['store'] })
     },
   })
+  // Removing asks twice: the first press arms the button, the second acts.
+  const [armed, setArmed] = useState(false)
+  const remove = useMutation({
+    mutationFn: (ids: NodeID[]) => api.remove(ids),
+    onSuccess: () => {
+      setPicked(new Set())
+      setArmed(false)
+      void qc.invalidateQueries({ queryKey: ['store'] })
+    },
+  })
+  const walk = useQuery({ queryKey: ['walk'], queryFn: api.walk, refetchInterval: 5000 })
 
   const children = useMemo(() => childrenOf(nodes), [nodes])
   // The points of each device, by the device, for the tab's decision.
@@ -83,11 +94,21 @@ export function Admin({ nodes, onClose }: { nodes: Nodes; onClose: () => void })
             Sideline
           </button>
         )}
+        <button
+          className={`button${armed ? ' danger' : ''}`}
+          onClick={() => (armed ? remove.mutate(pickedShown) : setArmed(true))}
+          onBlur={() => setArmed(false)}
+          disabled={pickedShown.length === 0 || remove.isPending}
+          title="Forget the picked points: for ones that have moved or are gone. A point the device still has comes back as new when the device is read."
+        >
+          {armed ? `Remove ${pickedShown.length}?` : 'Remove'}
+        </button>
         <button className="button" onClick={onClose}>
           Back
         </button>
       </div>
       {classify.isError && <p className="banner error">{classify.error.message}</p>}
+      {remove.isError && <p className="banner error">{remove.error.message}</p>}
       {store.isError && <p className="banner error">The explorer runs without a store: decisions are not kept.</p>}
 
       <div className="admin-list">
@@ -172,6 +193,14 @@ export function Admin({ nodes, onClose }: { nodes: Nodes; onClose: () => void })
         {store.data
           ? `Store ${store.data.dir}: ${store.data.latest ? `registry ${store.data.latest}` : 'no decision yet'}, ${plural(store.data.registries, 'registry file')}. Undecided points are in temp.json; each decision writes a new registry file.`
           : ''}
+        <br />
+        {walk.data && !walk.data.enabled && 'The background walk is off.'}
+        {walk.data?.enabled &&
+          `Background walk, ${walk.data.pointsPerMinute} points a minute: ${
+            walk.data.current
+              ? `reading ${walk.data.currentLabel}`
+              : walk.data.waiting ?? 'idle'
+          }; ${plural(walk.data.done, 'device')} walked this run, ${walk.data.due} due.${walk.data.lastError ? ` Last error: ${walk.data.lastError}` : ''}`}
       </p>
     </main>
   )

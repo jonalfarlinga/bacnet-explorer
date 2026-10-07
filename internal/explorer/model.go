@@ -101,6 +101,9 @@ type Node struct {
 	// Native is what the source needs to reach the node again after a
 	// restart. It is opaque to the core, which keeps it in the store.
 	Native json.RawMessage `json:"native,omitempty"`
+	// Walked is when the background walk last read the node's children;
+	// zero if never. Kept in the store.
+	Walked time.Time `json:"walked,omitempty"`
 	// Listed is set by the registry on a node that came in a children list,
 	// read on demand, as opposed to one the source announced on its own. A
 	// list that replaces a node's children replaces only the listed ones.
@@ -264,7 +267,8 @@ type Source interface {
 	// Children starts reading the nodes under a node. They arrive as
 	// children events, and the node's own Children state as node events,
 	// until the state is ready or error. Reading again replaces the list.
-	Children(ctx context.Context, id NodeID) error
+	// With a limit in the options, the source paces the reading by it.
+	Children(ctx context.Context, id NodeID, opts ChildrenOptions) error
 	// Detail reads everything behind one node, now.
 	Detail(ctx context.Context, id NodeID) (Detail, error)
 	// Read reads the current values of several points in one go. The
@@ -275,6 +279,20 @@ type Source interface {
 	// Events delivers what the source learns. The channel is never closed.
 	Events() <-chan Event
 	Status() Status
+}
+
+// ChildrenOptions says how a children read is to be done.
+type ChildrenOptions struct {
+	// Limit, when set, paces the read: the source waits on it for each
+	// node it is about to read, so that a background read stays quiet.
+	// Nil means as fast as the device allows.
+	Limit RateLimit
+}
+
+// RateLimit is a budget of reads over time.
+type RateLimit interface {
+	// Wait blocks until n reads may go, or ctx ends.
+	Wait(ctx context.Context, n int) error
 }
 
 var (

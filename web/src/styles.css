@@ -511,6 +511,12 @@ ol {
   box-shadow: inset 3px 0 0 #157347;
 }
 
+.button.danger {
+  color: #fff;
+  background: #b42318;
+  border-color: #b42318;
+}
+
 /* The admin panel. */
 .admin {
   flex: 1;

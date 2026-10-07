@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 )
@@ -18,6 +19,14 @@ type fake struct {
 	// node's children are read.
 	nodes    map[NodeID]Node
 	restored []Node
+
+	mu    sync.Mutex
+	reads []read // every children read asked of the fake, in order
+}
+
+type read struct {
+	id    NodeID
+	paced bool
 }
 
 func newFake() *fake {
@@ -42,7 +51,15 @@ func (f *fake) Add(ctx context.Context, form Values) (Node, error) {
 	f.nodes[n.ID] = n
 	return n, nil
 }
-func (f *fake) Children(ctx context.Context, id NodeID) error {
+func (f *fake) Children(ctx context.Context, id NodeID, opts ChildrenOptions) error {
+	f.mu.Lock()
+	f.reads = append(f.reads, read{id, opts.Limit != nil})
+	f.mu.Unlock()
+	if opts.Limit != nil {
+		if err := opts.Limit.Wait(ctx, len(f.children[id])); err != nil {
+			return err
+		}
+	}
 	f.events <- Event{Type: "children", Data: ChildrenEvent{Parent: id, Replace: true, Nodes: f.children[id]}}
 	n := f.nodes[id]
 	n.Children = ChildrenState{State: ChildrenReady, Total: len(f.children[id])}

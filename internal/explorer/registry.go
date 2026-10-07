@@ -27,6 +27,8 @@ type Registry struct {
 	inRegistry map[NodeID]bool
 	flushAfter time.Duration
 	flush      *time.Timer
+
+	walk *walker
 }
 
 type entry struct {
@@ -312,8 +314,9 @@ func (r *Registry) closeEntry(kind string, e *entry) {
 	r.mu.Unlock()
 }
 
-// CloseAll stops every source and writes the temp file.
+// CloseAll stops the walk and every source, and writes the temp file.
 func (r *Registry) CloseAll() {
+	r.StopWalk()
 	for _, info := range r.Sources() {
 		r.Close(info.Kind)
 	}
@@ -406,8 +409,12 @@ func (r *Registry) upsert(kind string, n Node, reached bool) {
 	if n.Kind == KindPoint && n.Track == "" {
 		n.Track = TrackNew
 	}
+	if old != nil && n.Walked.IsZero() {
+		n.Walked = old.Walked
+	}
 	if n.Kind != KindGroup {
-		if old == nil || old.Track != n.Track || old.Label != n.Label || old.Parent != n.Parent || string(old.Native) != string(n.Native) {
+		if old == nil || old.Track != n.Track || old.Label != n.Label || old.Parent != n.Parent ||
+			string(old.Native) != string(n.Native) || !old.Walked.Equal(n.Walked) {
 			r.markDirty()
 		}
 	}
@@ -517,6 +524,10 @@ func (r *Registry) Node(id NodeID) (Node, bool) {
 // and the revision they are at. The first call for a node starts reading
 // them, as does any call with refresh set; what is read arrives as events.
 func (r *Registry) Children(id NodeID, refresh bool) (uint64, []Node, error) {
+	return r.children(id, refresh, ChildrenOptions{})
+}
+
+func (r *Registry) children(id NodeID, refresh bool, opts ChildrenOptions) (uint64, []Node, error) {
 	r.mu.Lock()
 	n := r.nodes[id]
 	if n == nil {
@@ -540,12 +551,47 @@ func (r *Registry) Children(id NodeID, refresh bool) (uint64, []Node, error) {
 	r.mu.Unlock()
 
 	if start {
-		if err := e.src.Children(ctx, id); err != nil {
+		if err := e.src.Children(ctx, id, opts); err != nil {
 			return rev, nil, err
 		}
 	}
 	sortNodes(list)
 	return rev, list, nil
+}
+
+// Remove forgets some points, for ones that have moved or gone: they leave
+// the registry file and the temp file, and the tree. A point the device
+// still has comes back as new the next time its device is read.
+func (r *Registry) Remove(ids []NodeID) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, id := range ids {
+		n := r.nodes[id]
+		if n == nil {
+			continue
+		}
+		if n.Kind != KindPoint {
+			return fmt.Errorf("%s is not a point", id)
+		}
+		r.dropChildren(id, false)
+		delete(r.nodes, id)
+		delete(r.inRegistry, id)
+		r.publish(Event{Type: "remove", Data: id})
+	}
+	if r.store != nil {
+		var keep []Node
+		for id, n := range r.nodes {
+			if r.inRegistry[id] {
+				keep = append(keep, n.Node)
+			}
+		}
+		sortNodes(keep)
+		if _, err := r.store.WriteRegistry(keep); err != nil {
+			return err
+		}
+		r.markDirty()
+	}
+	return nil
 }
 
 // Detail reads everything behind a node, now. The node need not have been

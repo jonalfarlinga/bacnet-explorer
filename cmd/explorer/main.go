@@ -52,6 +52,8 @@ var (
 	flagTTL       = flag.Duration("bbmd-ttl", client.DefaultTTL, "how long each foreign-device registration lasts; it is renewed halfway through")
 	flagAdd       = flag.String("add", "", "comma-separated IP addresses (IP or IP:port) of devices to list by reading them, for those that no Who-Is reaches, such as devices on other IP subnets")
 	flagSim       = flag.Bool("sim", false, "browse simulated devices on this machine instead of a network")
+	flagWalk      = flag.Float64("walk", 60, "the background walk's budget in points a minute: it reads every device's points in turn, this slowly, standing aside while anyone else reads; 0 turns it off")
+	flagWalkAgain = flag.Duration("walk-again", 24*time.Hour, "how old a device's last walk must be before the walk reads it again")
 	flagStore     = flag.String("store", "data", "directory the explorer keeps what it finds in: temp.json for what is undecided, and a registry_<datetime>.json for each decision; empty runs without one")
 	flagLog       = flag.String("log", "", "print the client's log to stderr at this level: debug shows every I-Am heard and every datagram dropped, with why; info, routes and the BBMD registration; warn, refused sends and failures")
 	flagFrames    = flag.String("frames", "", "file to log every datagram sent and received to, in hex, for a capture without Wireshark")
@@ -189,6 +191,8 @@ func run() error {
 			}
 		}
 	}
+
+	reg.StartWalk(explorer.WalkConfig{PointsPerMinute: *flagWalk, Again: *flagWalkAgain})
 
 	ln, err := net.Listen("tcp", *flagHTTP)
 	if err != nil {

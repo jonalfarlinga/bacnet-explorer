@@ -208,6 +208,11 @@ Built on 2026-10-07, in the core, since a decision about a point is the same wha
 - **The admin panel** lists points by decision, grouped by device, and decides in batch over `POST /api/classify`. `GET /api/store` describes the store.
 - **Not persisted**: group nodes, which the source makes again from the devices; readings; children lists beyond the nodes themselves. Whether to keep a device's object list without reading it again was the open question; the answer is yes, as the points themselves, since they are what is decided about and what must show on start.
 
+### 6.1 Removing, and the background walk
+
+- **Remove** (`POST /api/remove`) forgets points that have moved or gone: out of memory, the registry file (written anew) and the temp file. A point the device still has comes back as new on the next read.
+- **The walk** (`internal/explorer/walk.go`) reads every reached device's children in the background, one device at a time, never-walked first and then longest ago, and again after `WalkConfig.Again` (a day). It is paced by a point budget, `PointsPerMinute` (60 by default), a token bucket the source waits on for each node it is about to read: `Source.Children` takes a `ChildrenOptions.Limit` for this, nil for a user's read. The BACnet source waits once per object in a batch and once per element of an object list read one at a time. The walk stands aside while any device is being read for someone else, and gives a device half an hour before moving on. `Walked` is kept on the device node, in the store, so a restart does not start the walk over. `GET /api/walk` reports where it stands.
+
 ## 7. Decisions to make
 
 1. **Node ID stability across a device's address change.** For BACnet the instance is the identity and the address is a fact, which is right. For Modbus the address is the identity unless the user names the unit in the register map. The register map should carry a `name` that becomes the ID, with the address as a fact, so that moving a meter to another IP keeps its history.

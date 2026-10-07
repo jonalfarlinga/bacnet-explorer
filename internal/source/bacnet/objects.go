@@ -29,8 +29,9 @@ type object struct {
 // Children implements explorer.Source: for a device, it reads the object
 // list and then the name and value of each object, publishing them as it
 // goes. Networks and routers have nothing to read: their children are the
-// devices that announced themselves.
-func (s *Source) Children(ctx context.Context, id explorer.NodeID) error {
+// devices that announced themselves. With a limit, each object read, and
+// each element of an object list read one at a time, waits its turn.
+func (s *Source) Children(ctx context.Context, id explorer.NodeID, opts explorer.ChildrenOptions) error {
 	instance, obj, ok := parseID(id)
 	if !ok {
 		return nil
@@ -61,7 +62,7 @@ func (s *Source) Children(ctx context.Context, id explorer.NodeID) error {
 
 	s.emit(explorer.Event{Type: "node", Data: n})
 	s.emit(explorer.Event{Type: "children", Data: explorer.ChildrenEvent{Parent: id, Replace: true, Nodes: []explorer.Node{}}})
-	go s.enumerate(rctx, c, dev)
+	go s.enumerate(rctx, c, dev, opts.Limit)
 	return nil
 }
 
@@ -81,16 +82,29 @@ func (s *Source) update(ctx context.Context, instance uint32, change func(d *dev
 	return true
 }
 
-func (s *Source) enumerate(ctx context.Context, c *client.Client, dev client.Device) {
+func (s *Source) enumerate(ctx context.Context, c *client.Client, dev client.Device, limit explorer.RateLimit) {
 	fail := func(err error) {
 		s.update(ctx, dev.Instance, func(d *device) {
 			d.children.State = explorer.ChildrenError
 			d.children.Error = err.Error()
 		})
 	}
+	wait := func(n int) error {
+		if limit == nil {
+			return nil
+		}
+		return limit.Wait(ctx, n)
+	}
 
 	var lastProgress time.Time
+	if err := wait(1); err != nil {
+		fail(err)
+		return
+	}
 	ids, err := c.ReadObjectList(ctx, dev, func(done, total int) {
+		// An object list read one element at a time is paced like the
+		// objects themselves; the callback runs in the reading loop.
+		wait(1)
 		if time.Since(lastProgress) < 250*time.Millisecond {
 			return
 		}
@@ -132,6 +146,10 @@ func (s *Source) enumerate(ctx context.Context, c *client.Client, dev client.Dev
 	batch := batchSize(dev)
 	for start := 0; start < len(ids); start += batch {
 		end := min(start+batch, len(ids))
+		if err := wait(end - start); err != nil {
+			fail(err)
+			return
+		}
 		if err := r.read(ids[start:end]); err != nil {
 			fail(err)
 			return

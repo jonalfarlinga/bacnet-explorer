@@ -112,6 +112,18 @@ export interface Source {
 
 export type Values = Record<string, string>
 
+export interface WalkStatus {
+  enabled: boolean
+  pointsPerMinute: number
+  current?: string
+  currentLabel?: string
+  done: number
+  due: number
+  last?: string
+  lastError?: string
+  waiting?: string
+}
+
 export interface StoreInfo {
   dir: string
   latest?: string
@@ -151,4 +163,6 @@ export const api = {
   detail: (id: NodeID) => request<Detail>(withID('/api/node/detail', id)),
   store: () => request<StoreInfo>('/api/store'),
   classify: (ids: NodeID[], track: Track) => request<Node[]>('/api/classify', { ids, track }),
+  remove: (ids: NodeID[]) => request<void>('/api/remove', { ids }),
+  walk: () => request<WalkStatus>('/api/walk'),
 }

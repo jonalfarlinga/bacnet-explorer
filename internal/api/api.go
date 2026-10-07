@@ -177,6 +177,29 @@ func New(cfg Config) http.Handler {
 		reply(w, nodes)
 	})
 
+	// Forgets some points, for ones that have moved or gone.
+	mux.HandleFunc("POST /api/remove", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			IDs []explorer.NodeID `json:"ids"`
+		}
+		if !readJSON(w, r, &body) {
+			return
+		}
+		if len(body.IDs) == 0 || len(body.IDs) > 10000 {
+			http.Error(w, "give 1 to 10000 node ids", http.StatusBadRequest)
+			return
+		}
+		if err := reg.Remove(body.IDs); err != nil {
+			fail(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	mux.HandleFunc("GET /api/walk", func(w http.ResponseWriter, r *http.Request) {
+		reply(w, reg.WalkStatus())
+	})
+
 	mux.HandleFunc("GET /api/events", func(w http.ResponseWriter, r *http.Request) {
 		events(w, r, reg)
 	})
