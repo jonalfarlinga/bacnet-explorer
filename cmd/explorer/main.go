@@ -17,6 +17,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -45,6 +46,7 @@ var (
 	flagRetries   = flag.Int("retries", 2, "how many times to resend a request that got no reply")
 	flagBBMD      = flag.String("bbmd", "", "register as a foreign device with the BBMD at this address (IP or IP:port) to reach a BACnet network on another IP subnet")
 	flagTTL       = flag.Duration("bbmd-ttl", client.DefaultTTL, "how long each foreign-device registration lasts; it is renewed halfway through")
+	flagAdd       = flag.String("add", "", "comma-separated IP addresses (IP or IP:port) of devices to list by reading them, for those that no Who-Is reaches, such as devices on other IP subnets")
 	flagSim       = flag.Bool("sim", false, "browse simulated devices on this machine instead of a network")
 	flagLog       = flag.String("log", "", "print the client's log to stderr at this level: debug shows every I-Am heard and every datagram dropped, with why; info, routes and the BBMD registration; warn, refused sends and failures")
 	flagFrames    = flag.String("frames", "", "file to log every datagram sent and received to, in hex, for a capture without Wireshark")
@@ -117,8 +119,34 @@ func run() error {
 		}
 	}
 
+	var adds []client.Address
+	if *flagAdd != "" {
+		for _, s := range strings.Split(*flagAdd, ",") {
+			addr, err := api.ParseAddress(s, 0, "")
+			if err != nil {
+				return fmt.Errorf("-add: %w", err)
+			}
+			adds = append(adds, addr)
+		}
+	}
 	svc := discovery.New()
 	defer svc.Close()
+
+	// addAll lists the devices given with -add, once the socket is open.
+	addAll := func() {
+		for _, addr := range adds {
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+				defer cancel()
+				dev, err := svc.Add(ctx, addr, 0)
+				if err != nil {
+					fmt.Fprintln(os.Stderr, "explorer: -add:", err)
+					return
+				}
+				fmt.Printf("added device %d at %s\n", dev.ID, addr)
+			}()
+		}
+	}
 
 	use := func(ifc client.Interface) error {
 		cfg := ifc.Config(uint16(*flagPort))
@@ -136,6 +164,7 @@ func run() error {
 		} else {
 			fmt.Printf("BACnet/IP on %s (%s), broadcasting to %s\n", ifc.Name, cfg.Local, cfg.Broadcast)
 		}
+		addAll()
 		return nil
 	}
 	cfg := api.Config{Service: svc, UI: web.UI()}
@@ -159,6 +188,7 @@ func run() error {
 			return err
 		}
 		fmt.Println("browsing simulated devices at", network.Addr())
+		addAll()
 	case *flagInterface != "":
 		ifc, err := client.FindInterface(*flagInterface)
 		if err != nil {

@@ -2,6 +2,7 @@ package discovery
 
 import (
 	"context"
+	"errors"
 	"net/netip"
 	"testing"
 	"time"
@@ -233,5 +234,48 @@ func TestFormatProperty(t *testing.T) {
 	}
 	if got := shortNumber(-0.0001); got != "0" {
 		t.Errorf("a tiny negative number is shown as %q", got)
+	}
+}
+
+// A device that no Who-Is reaches is added by its address and identified
+// like any other.
+func TestAddByAddress(t *testing.T) {
+	network, err := sim.Start()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(network.Close)
+
+	s := New()
+	t.Cleanup(s.Close)
+	// The Who-Is goes nowhere: no device announces itself.
+	err = s.Use("test", client.Config{
+		Local:     netip.MustParseAddrPort("127.0.0.1:0"),
+		Broadcast: netip.MustParseAddrPort("127.0.0.1:9"),
+		Timeout:   time.Second,
+	}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if n := len(s.Devices()); n != 0 {
+		t.Fatalf("%d devices answered a Who-Is to nobody", n)
+	}
+
+	stations := network.Addrs()
+	added, err := s.Add(context.Background(), client.Address{IP: stations[3]}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if added.ID != 4000 || !added.Added || added.Address != stations[3].String() || added.MaxAPDU != 206 {
+		t.Errorf("added %+v, want device 4000 at %v with a 206-byte APDU", added, stations[3])
+	}
+	waitFor(t, "the added device to be named", func() bool { return deviceOf(s, 4000).Name != "" })
+	if d := deviceOf(s, 4000); d.Name != "BOILER-1" || !d.Added {
+		t.Errorf("the added device is %+v, want BOILER-1, marked as added", d)
+	}
+
+	if _, err := s.Add(context.Background(), client.Address{IP: netip.MustParseAddrPort("127.0.0.1:9")}, 0); !errors.Is(err, client.ErrTimeout) {
+		t.Errorf("adding nobody gave %v, want a timeout", err)
 	}
 }

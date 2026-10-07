@@ -41,6 +41,9 @@ type Device struct {
 	MaxAPDU      uint16 `json:"maxApdu"`
 	Segmentation string `json:"segmentation"`
 	VendorID     uint16 `json:"vendorId"`
+	// Added is set for a device that was added by its address rather than
+	// heard announcing itself.
+	Added bool `json:"added,omitempty"`
 
 	Name        string `json:"name,omitempty"`
 	VendorName  string `json:"vendorName,omitempty"`
@@ -264,10 +267,33 @@ var segmentationNames = []string{"both", "transmit only", "receive only", "none"
 
 // onIAm runs in the client's read loop.
 func (s *Service) onIAm(dev client.Device) {
+	s.record(dev, false)
+}
+
+// Add lists the device at an address that no Who-Is reaches, by reading what
+// its I-Am would have said. With instance 0 the device's own instance is
+// read. The device is then identified like any other.
+func (s *Service) Add(ctx context.Context, addr client.Address, instance uint32) (Device, error) {
+	s.mu.Lock()
+	c := s.client
+	s.mu.Unlock()
+	if c == nil {
+		return Device{}, ErrNoTransport
+	}
+	dev, err := c.Probe(ctx, addr, instance)
+	if err != nil {
+		return Device{}, fmt.Errorf("device at %v: %w", addr, err)
+	}
+	return s.record(dev, true), nil
+}
+
+// record takes in what is known about a device, from its I-Am or from
+// reading it, and returns the device as listed.
+func (s *Service) record(dev client.Device, added bool) Device {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.client == nil {
-		return
+		return Device{}
 	}
 
 	d, known := s.devices[dev.Instance]
@@ -277,6 +303,7 @@ func (s *Service) onIAm(dev client.Device) {
 	}
 	before := d.view
 	d.dev = dev
+	d.view.Added = d.view.Added || added
 	d.view.Address = dev.Addr.IP.String()
 	d.view.Network = dev.Addr.Net
 	d.view.MAC = ""
@@ -296,6 +323,7 @@ func (s *Service) onIAm(dev client.Device) {
 	if !known {
 		go s.identify(s.ctx, s.client, dev)
 	}
+	return d.view
 }
 
 // identify reads the properties that name a device.

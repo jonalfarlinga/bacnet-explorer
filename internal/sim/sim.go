@@ -145,6 +145,15 @@ func (n *Network) Addr() netip.AddrPort {
 	return n.stations[0].addr()
 }
 
+// Addrs is the address of every station, in the order they were given.
+func (n *Network) Addrs() []netip.AddrPort {
+	addrs := make([]netip.AddrPort, len(n.stations))
+	for i, st := range n.stations {
+		addrs[i] = st.addr()
+	}
+	return addrs
+}
+
 // Close stops the devices.
 func (n *Network) Close() {
 	for _, st := range n.stations {

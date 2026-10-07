@@ -108,6 +108,7 @@ export function App() {
         <span className="spacer" />
         {!connected && <span className="flag fault">reconnecting</span>}
         {transport && <span className="sub">{plural(devices.length, 'device')}</span>}
+        {transport && <AddDevice />}
         {transport && <ScanButton />}
       </header>
 
@@ -190,6 +191,57 @@ function ScanButton() {
     >
       {scan.isError ? 'Scan failed' : sent ? 'Who-Is sent' : 'Scan'}
     </button>
+  )
+}
+
+// AddDevice takes the address of a device that no Who-Is reaches, such as
+// one on another IP subnet, and has the explorer read it instead.
+function AddDevice() {
+  const [open, setOpen] = useState(false)
+  const [address, setAddress] = useState('')
+  const add = useMutation({
+    mutationFn: api.addDevice,
+    onSuccess: () => {
+      setAddress('')
+      setOpen(false)
+    },
+  })
+  if (!open) {
+    return (
+      <button className="button" onClick={() => setOpen(true)} title="List a device that does not answer the Who-Is, by its IP address">
+        Add by address
+      </button>
+    )
+  }
+  return (
+    <form
+      className="add-device"
+      onSubmit={(e) => {
+        e.preventDefault()
+        if (address.trim()) add.mutate(address.trim())
+      }}
+    >
+      <input
+        className="filter"
+        type="text"
+        placeholder="IP address, or IP:port"
+        aria-label="Device IP address"
+        value={address}
+        autoFocus
+        disabled={add.isPending}
+        onChange={(e) => setAddress(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Escape') setOpen(false)
+        }}
+      />
+      <button className="button primary" type="submit" disabled={add.isPending || !address.trim()}>
+        {add.isPending ? 'Reading…' : 'Add'}
+      </button>
+      <button className="button" type="button" onClick={() => setOpen(false)} disabled={add.isPending}>
+        Cancel
+      </button>
+      {add.isError && <span className="flag fault" title={add.error.message}>{add.error.message}</span>}
+    </form>
   )
 }
 

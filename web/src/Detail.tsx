@@ -74,6 +74,14 @@ export function DeviceDetail({ device, router, objects }: DeviceDetailProps) {
               <span className="mono">{device.address}</span>
             </>
           )}
+          {device.added && (
+            <>
+              {' '}
+              <span className="sub" title="This device did not answer the Who-Is: it was added by its address and read directly.">
+                (added by address)
+              </span>
+            </>
+          )}
         </Fact>
         <Fact label="Vendor">
           {device.vendorName ? `${device.vendorName} (${device.vendorId})` : `Vendor ${device.vendorId}`}

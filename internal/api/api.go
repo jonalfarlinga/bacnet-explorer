@@ -2,12 +2,15 @@
 package api
 
 import (
+	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"mime"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"strings"
 	"time"
@@ -92,6 +95,38 @@ func New(cfg Config) http.Handler {
 
 	mux.HandleFunc("GET /api/devices", func(w http.ResponseWriter, r *http.Request) {
 		reply(w, s.Devices())
+	})
+
+	// Adds a device by its address, for one that no Who-Is reaches.
+	mux.HandleFunc("POST /api/devices", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			// Address is the device's IP, with a port after a colon when it
+			// is not 47808; for a routed device, its router's.
+			Address  string `json:"address"`
+			Instance uint32 `json:"instance"` // 0 to read it from the device
+			Network  uint16 `json:"network"`  // 0 for a device at Address itself
+			MAC      string `json:"mac"`      // the MAC on Network, in hex
+		}
+		if !readJSON(w, r, &body) {
+			return
+		}
+		addr, err := ParseAddress(body.Address, body.Network, body.MAC)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if body.Instance > client.WildcardInstance {
+			http.Error(w, "bad instance", http.StatusBadRequest)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		defer cancel()
+		dev, err := s.Add(ctx, addr, body.Instance)
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		reply(w, dev)
 	})
 
 	objectsOf := func(refresh bool) http.HandlerFunc {
@@ -193,6 +228,32 @@ func ui(dist fs.FS) http.Handler {
 		}
 		files.ServeHTTP(w, r)
 	})
+}
+
+// ParseAddress reads a device address as a user writes it: an IP with an
+// optional port, and for a device behind a router, its network number and
+// MAC in hex.
+func ParseAddress(address string, network uint16, mac string) (client.Address, error) {
+	address = strings.TrimSpace(address)
+	ip, err := netip.ParseAddrPort(address)
+	if err != nil {
+		a, err := netip.ParseAddr(address)
+		if err != nil {
+			return client.Address{}, fmt.Errorf("%q is not an IP address or IP:port", address)
+		}
+		ip = netip.AddrPortFrom(a, client.DefaultPort)
+	}
+	addr := client.Address{IP: ip, Net: network}
+	if network != 0 {
+		b, err := hex.DecodeString(strings.TrimSpace(mac))
+		if err != nil || len(b) == 0 || len(b) > 8 {
+			return client.Address{}, fmt.Errorf("MAC %q is not 1 to 8 bytes in hex", mac)
+		}
+		addr.MAC = b
+	} else if strings.TrimSpace(mac) != "" {
+		return client.Address{}, errors.New("a MAC goes with a network number")
+	}
+	return addr, nil
 }
 
 func reply(w http.ResponseWriter, v any) {

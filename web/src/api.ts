@@ -33,6 +33,9 @@ export interface Device {
   maxApdu: number
   segmentation: string
   vendorId: number
+  // Set for a device that was added by its address rather than heard
+  // announcing itself.
+  added?: boolean
   name?: string
   vendorName?: string
   modelName?: string
@@ -105,6 +108,9 @@ export const api = {
   status: () => request<Status>('/api/status'),
   selectAdapter: (adapter: string) => request<Transport>('/api/transport', { adapter }),
   scan: () => request<void>('/api/discovery', {}),
+  // Adds a device by its IP (with :port when not 47808), for one that no
+  // Who-Is reaches. The device's instance is read from it.
+  addDevice: (address: string) => request<Device>('/api/devices', { address }),
   objects: (device: number) => request<ObjectList>(`/api/devices/${device}/objects`),
   reloadObjects: (device: number) => request<ObjectList>(`/api/devices/${device}/refresh`, {}),
   properties: (device: number, type: number, instance: number) =>

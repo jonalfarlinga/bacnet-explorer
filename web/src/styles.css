@@ -476,6 +476,26 @@ ol {
   color: var(--muted);
 }
 
+/* The add-by-address form in the header bar. */
+.add-device {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.add-device .filter {
+  margin: 0;
+  width: 190px;
+}
+
+.add-device .flag {
+  max-width: 260px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .flag {
   flex: none;
   font-size: 10.5px;
