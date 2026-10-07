@@ -83,12 +83,20 @@ type Config struct {
 	BindAny bool
 	// Broadcast is where Who-Is goes.
 	Broadcast netip.AddrPort
-	// Subnet, when valid, limits what is accepted to datagrams from it. It
-	// is ignored with ForeignDevice, whose devices are on another subnet.
-	Subnet netip.Prefix
+	// Exclude drops datagrams from these subnets: those of the machine's
+	// other adapters, which a socket bound with BindAny hears as well.
+	// Anything else is accepted, since a device on another IP subnet may
+	// answer directly, or through a BBMD.
+	Exclude []netip.Prefix
 
 	Timeout time.Duration // wait for each reply; 3s if not set
 	Retries int           // resends of a request that got no reply
+
+	// OnPacket is called from the read loop for every datagram received,
+	// and from the sender for every one sent, before anything is done with
+	// it. It must not block. Data is the datagram, which the receiver may
+	// keep.
+	OnPacket func(PacketEvent)
 
 	// ForeignDevice registers the client with a BBMD on another IP subnet.
 	// Broadcasts then go to the BBMD as Distribute-Broadcast-To-Network,
@@ -103,6 +111,16 @@ type Config struct {
 	// OnIAm is called from the read loop for every I-Am heard. It must not
 	// block.
 	OnIAm func(Device)
+}
+
+// PacketEvent is one datagram sent or received.
+type PacketEvent struct {
+	Time time.Time
+	// Inbound is true for a datagram received, from Peer; false for one
+	// sent, to Peer.
+	Inbound bool
+	Peer    netip.AddrPort
+	Data    []byte
 }
 
 var (
@@ -196,7 +214,6 @@ func Open(cfg Config) (*Client, error) {
 		if cfg.ForeignDevice.TTL <= 0 {
 			cfg.ForeignDevice.TTL = DefaultTTL
 		}
-		cfg.Subnet = netip.Prefix{}
 	}
 	bind := cfg.Local
 	if cfg.BindAny {
@@ -355,6 +372,9 @@ func (c *Client) send(to netip.AddrPort, msg plumbing.BACnet) error {
 	if err != nil {
 		return err
 	}
+	if c.cfg.OnPacket != nil {
+		c.cfg.OnPacket(PacketEvent{Time: time.Now(), Peer: to, Data: b})
+	}
 	_, err = c.conn.WriteToUDPAddrPort(b, to)
 	return err
 }
@@ -427,39 +447,64 @@ func (c *Client) readLoop() {
 		}
 		failures = 0
 		src = netip.AddrPortFrom(src.Addr().Unmap(), src.Port())
+		if c.cfg.OnPacket != nil {
+			c.cfg.OnPacket(PacketEvent{Time: time.Now(), Inbound: true, Peer: src, Data: append([]byte(nil), buf[:n]...)})
+		}
+
+		if src == c.cfg.Local {
+			continue // the client's own broadcast coming back
+		}
+		if c.excluded(src.Addr()) {
+			c.log.Debug("dropped a datagram from another adapter's subnet", "from", src)
+			continue
+		}
 
 		// A message a BBMD forwarded comes from the device at its origin;
 		// the BBMD is only the carrier.
 		var hdr plumbing.BVLC
 		if err := hdr.UnmarshalBinary(buf[:n]); err != nil {
+			c.log.Debug("dropped a datagram that is not BACnet/IP", "from", src, "error", err)
 			continue
 		}
 		if origin, ok := hdr.OriginAddrPort(); ok {
+			if origin == c.cfg.Local {
+				continue // the client's own broadcast, back from the BBMD
+			}
 			src = origin
-		}
-		if src == c.cfg.Local {
-			continue
-		}
-		if c.cfg.Subnet.IsValid() && !c.cfg.Subnet.Contains(src.Addr()) {
-			continue
 		}
 		msg, err := bacnet.ParseWithFallback(buf[:n])
 		if err != nil {
+			c.log.Debug("dropped a datagram that could not be parsed", "from", src, "error", err, "bytes", fmt.Sprintf("%x", buf[:n]))
 			continue
 		}
 		c.dispatch(src, msg)
 	}
 }
 
+func (c *Client) excluded(addr netip.Addr) bool {
+	for _, p := range c.cfg.Exclude {
+		if p.Contains(addr) {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *Client) dispatch(src netip.AddrPort, msg plumbing.BACnet) {
 	switch m := msg.(type) {
 	case *services.UnconfirmedIAm:
 		c.noteSource(src, m.NPDU)
-		if c.cfg.OnIAm == nil {
+		d, err := m.Decode()
+		if err != nil {
+			c.log.Warn("dropped an I-Am that could not be decoded", "from", sourceOf(src, m.NPDU), "error", err)
 			return
 		}
-		d, err := m.Decode()
-		if err != nil || d.DeviceType != objects.ObjectTypeDevice {
+		if d.DeviceType != objects.ObjectTypeDevice {
+			c.log.Warn("dropped an I-Am for an object that is not a device", "from", sourceOf(src, m.NPDU), "type", d.DeviceType, "instance", d.InstanceNum)
+			return
+		}
+		c.log.Debug("I-Am", "device", d.InstanceNum, "from", sourceOf(src, m.NPDU))
+		if c.cfg.OnIAm == nil {
 			return
 		}
 		c.cfg.OnIAm(Device{
@@ -487,6 +532,8 @@ func (c *Client) dispatch(src netip.AddrPort, msg plumbing.BACnet) {
 		c.bvlcReply(src, waitFDT, m)
 	case *plumbing.ReadBroadcastDistributionTableAck:
 		c.bvlcReply(src, waitBDT, m)
+	default:
+		c.log.Debug("ignored a message", "from", src, "type", fmt.Sprintf("%T", msg), "service", msg.GetService())
 	}
 }
 

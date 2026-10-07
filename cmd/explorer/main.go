@@ -20,12 +20,14 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/netip"
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jonalfarlinga/bacnet/internal/api"
@@ -44,6 +46,8 @@ var (
 	flagBBMD      = flag.String("bbmd", "", "register as a foreign device with the BBMD at this address (IP or IP:port) to reach a BACnet network on another IP subnet")
 	flagTTL       = flag.Duration("bbmd-ttl", client.DefaultTTL, "how long each foreign-device registration lasts; it is renewed halfway through")
 	flagSim       = flag.Bool("sim", false, "browse simulated devices on this machine instead of a network")
+	flagLog       = flag.String("log", "", "print the client's log to stderr at this level: debug shows every I-Am heard and every datagram dropped, with why; info, routes and the BBMD registration; warn, refused sends and failures")
+	flagFrames    = flag.String("frames", "", "file to log every datagram sent and received to, in hex, for a capture without Wireshark")
 )
 
 func main() {
@@ -86,6 +90,33 @@ func run() error {
 		}
 		foreign = &client.ForeignDeviceConfig{BBMD: bbmd, TTL: *flagTTL}
 	}
+	var logger *slog.Logger
+	if *flagLog != "" {
+		var level slog.Level
+		if err := level.UnmarshalText([]byte(*flagLog)); err != nil {
+			return fmt.Errorf("-log: %w", err)
+		}
+		logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+	}
+	var onPacket func(client.PacketEvent)
+	if *flagFrames != "" {
+		f, err := os.OpenFile(*flagFrames, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		if err != nil {
+			return fmt.Errorf("-frames: %w", err)
+		}
+		defer f.Close()
+		var mu sync.Mutex
+		onPacket = func(e client.PacketEvent) {
+			dir := "to"
+			if e.Inbound {
+				dir = "from"
+			}
+			mu.Lock()
+			fmt.Fprintf(f, "%s %s %s %x\n", e.Time.Format("15:04:05.000"), dir, e.Peer, e.Data)
+			mu.Unlock()
+		}
+	}
+
 	svc := discovery.New()
 	defer svc.Close()
 
@@ -93,6 +124,7 @@ func run() error {
 		cfg := ifc.Config(uint16(*flagPort))
 		cfg.Timeout, cfg.Retries = *flagTimeout, *flagRetries
 		cfg.ForeignDevice = foreign
+		cfg.Logger, cfg.OnPacket = logger, onPacket
 		if err := svc.Use(ifc.Name, cfg, false); err != nil {
 			if inUse(err) {
 				return fmt.Errorf("UDP port %d on %s (%s) is in use: another BACnet program on this machine has it open", cfg.Local.Port(), ifc.Name, cfg.Local.Addr())
@@ -120,6 +152,8 @@ func run() error {
 			Broadcast: network.Addr(),
 			Timeout:   *flagTimeout,
 			Retries:   *flagRetries,
+			Logger:    logger,
+			OnPacket:  onPacket,
 		}, true)
 		if err != nil {
 			return err

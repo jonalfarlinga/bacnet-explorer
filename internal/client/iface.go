@@ -75,12 +75,24 @@ func FindInterface(nameOrIP string) (Interface, error) {
 }
 
 // Config returns the configuration that listens on the adapter and
-// broadcasts to its subnet.
+// broadcasts to its subnet. Where the socket has to be bound to every
+// address to hear broadcasts, the subnets of the other adapters are excluded
+// so that only this adapter's traffic is taken.
 func (i Interface) Config(port uint16) Config {
-	return Config{
+	cfg := Config{
 		Local:     netip.AddrPortFrom(i.Addr.Addr(), port),
 		BindAny:   runtime.GOOS != "windows",
 		Broadcast: netip.AddrPortFrom(i.Broadcast, port),
-		Subnet:    i.Addr.Masked(),
 	}
+	if cfg.BindAny {
+		if list, err := Interfaces(); err == nil {
+			mine := i.Addr.Masked()
+			for _, other := range list {
+				if subnet := other.Addr.Masked(); subnet != mine {
+					cfg.Exclude = append(cfg.Exclude, subnet)
+				}
+			}
+		}
+	}
+	return cfg
 }
