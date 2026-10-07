@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jonalfarlinga/bacnet/internal/client"
+	"github.com/jonalfarlinga/bacnet/client"
 	"github.com/jonalfarlinga/bacnet/internal/discovery"
 )
 

@@ -32,9 +32,9 @@ import (
 	"time"
 
 	"github.com/jonalfarlinga/bacnet/internal/api"
-	"github.com/jonalfarlinga/bacnet/internal/client"
+	"github.com/jonalfarlinga/bacnet/client"
 	"github.com/jonalfarlinga/bacnet/internal/discovery"
-	"github.com/jonalfarlinga/bacnet/internal/sim"
+	"github.com/jonalfarlinga/bacnet/client/sim"
 	"github.com/jonalfarlinga/bacnet/web"
 )
 

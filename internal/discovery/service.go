@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jonalfarlinga/bacnet/internal/client"
+	"github.com/jonalfarlinga/bacnet/client"
 	"github.com/jonalfarlinga/bacnet/objects"
 )
 
