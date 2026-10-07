@@ -1,8 +1,5 @@
-import { objectKey, type BacnetObject, type Device, type ObjectList } from './api'
-
-export type Selection =
-  | { kind: 'device'; device: number }
-  | { kind: 'object'; device: number; type: number; instance: number }
+import type { Node, NodeID } from './api'
+import type { Nodes } from './live'
 
 interface RowBase {
   key: string
@@ -11,26 +8,20 @@ interface RowBase {
 
 export type Row = RowBase &
   (
-    | { kind: 'device'; device: Device; open: boolean }
-    // A router the devices behind it name, but which has not answered itself.
-    | { kind: 'router'; address: string; open: boolean }
-    | { kind: 'network'; network: number; count: number; open: boolean }
-    | { kind: 'group'; typeName: string; count: number; open: boolean }
-    | { kind: 'object'; device: number; object: BacnetObject }
+    | { kind: 'node'; node: Node; open: boolean; count: number }
+    | { kind: 'group'; name: string; count: number; open: boolean }
     | { kind: 'note'; text: string; tone: 'muted' | 'error' | 'busy' }
   )
 
-export const deviceRowKey = (id: number) => `d${id}`
-export const objectRowKey = (device: number, o: { type: number; instance: number }) =>
-  `d${device}/o${objectKey(o)}`
+export const groupKey = (parent: NodeID, name: string) => `${parent}/g:${name}`
 
 // What is open when the user has not said: devices start closed, so that
-// nothing is read from a device until it is picked.
-const openByDefault = { device: false, router: true, network: true, group: true }
+// nothing is read from a device until it is picked; everything else, which
+// costs nothing to show, starts open.
+const openByDefault = (n: Node) => n.kind !== 'device'
 
 export interface TreeInput {
-  devices: Device[]
-  objects: (device: number) => ObjectList | undefined
+  nodes: Nodes
   // The user's own opening and closing of rows, by key.
   toggled: ReadonlyMap<string, boolean>
   filter: string
@@ -45,121 +36,98 @@ function matcher(filter: string): ((...fields: (string | number | undefined)[]) 
   }
 }
 
-export function titleCase(typeName: string): string {
-  return typeName
-    .split('-')
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-    .join(' ')
+const byOrder = (a: Node, b: Node) => a.order - b.order || a.label.localeCompare(b.label) || a.id.localeCompare(b.id)
+
+// childrenOf indexes the nodes by parent, sorted as the source ordered them.
+export function childrenOf(nodes: Nodes): ReadonlyMap<NodeID | '', Node[]> {
+  const index = new Map<NodeID | '', Node[]>()
+  for (const n of nodes.values()) {
+    const key = n.parent ?? ''
+    const list = index.get(key)
+    if (list) list.push(n)
+    else index.set(key, [n])
+  }
+  for (const list of index.values()) list.sort(byOrder)
+  return index
 }
 
-// buildRows lays the tree out as the rows to draw, top to bottom. Devices
-// with an address of their own are at the top level. A device behind a
-// router hangs off the router, under its network; a device's objects hang
-// off the device, grouped by type.
-export function buildRows({ devices, objects, toggled, filter }: TreeInput): Row[] {
+// buildRows lays the tree out as the rows to draw, top to bottom. Children
+// that share a group go under a heading of that name.
+export function buildRows({ nodes, toggled, filter }: TreeInput): Row[] {
   const match = matcher(filter)
-  const isOpen = (key: string, kind: keyof typeof openByDefault) => toggled.get(key) ?? openByDefault[kind]
+  const children = childrenOf(nodes)
+  const isOpen = (key: string, node?: Node) => toggled.get(key) ?? (node ? openByDefault(node) : true)
 
-  const local = devices.filter((d) => d.network === 0)
-  const routed = new Map<string, Device[]>() // by router address
-  for (const d of devices) {
-    if (d.network === 0) continue
-    const list = routed.get(d.address) ?? []
-    list.push(d)
-    routed.set(d.address, list)
+  const nodeMatches = (n: Node) =>
+    !match ||
+    match(n.label, n.sublabel, n.meta, n.tag, n.group, n.reading?.text, ...(n.facts ?? []).map((f) => f.value))
+
+  // nodeRows returns the node's row and everything under it, or nothing
+  // when a filter is set and neither the node nor anything under it matches.
+  const nodeRows = (n: Node, depth: number): Row[] => {
+    const under = children.get(n.id) ?? []
+    const self = nodeMatches(n)
+    const belowRows = under.length > 0 ? listRows(under, n.id, depth + 1, self) : []
+    if (match && !self && belowRows.length === 0) return []
+
+    // Under a filter, a node is opened to show what matched inside it.
+    const forced = match !== null && belowRows.length > 0
+    const open = forced || isOpen(n.id, n)
+    const rows: Row[] = [{ kind: 'node', key: n.id, depth, node: n, open, count: under.length }]
+    if (!open || n.children.state === 'none') return rows
+
+    rows.push(...belowRows)
+    const state = n.children
+    if (state.state === 'error') {
+      rows.push({ kind: 'note', key: `${n.id}/error`, depth: depth + 1, tone: 'error', text: state.error ?? 'Could not read what is under it' })
+    } else if (state.state === 'loading' && under.length === 0) {
+      const text = state.total > 0 ? `Reading… ${state.total} items` : 'Reading…'
+      rows.push({ kind: 'note', key: `${n.id}/busy`, depth: depth + 1, tone: 'busy', text })
+    } else if (state.state === 'ready' && under.length === 0) {
+      rows.push({ kind: 'note', key: `${n.id}/none`, depth: depth + 1, tone: 'muted', text: 'Nothing under it' })
+    }
+    return rows
   }
 
-  // deviceRows returns the device's row and everything under it, or nothing
-  // when a filter is set and neither the device nor anything under it matches.
-  const deviceRows = (d: Device, depth: number): Row[] => {
-    const key = deviceRowKey(d.id)
-    const deviceMatches =
-      !match || match(d.name, d.id, `#${d.id}`, d.address, d.mac, d.vendorName, d.modelName, d.description, d.location)
-    const list = objects(d.id)
-
-    let shown = list?.objects ?? []
-    let narrowed = false
-    if (match && list) {
-      const hits = shown.filter((o) =>
-        match(o.name, o.description, o.typeName, `${o.typeName}:${o.instance}`, `${o.abbr}${o.instance}`, `${o.abbr}:${o.instance}`),
-      )
-      // A device that matches by itself keeps all its objects unless some of
-      // them match too.
-      if (hits.length > 0 || !deviceMatches) {
-        shown = hits
-        narrowed = true
+  // listRows lays out siblings, grouped where the source grouped them. With
+  // parentMatches, a filter keeps every child the way it keeps the parent.
+  const listRows = (list: Node[], parent: NodeID, depth: number, parentMatches: boolean): Row[] => {
+    const rows: Row[] = []
+    for (let i = 0; i < list.length; ) {
+      const group = list[i].group
+      if (!group) {
+        rows.push(...nodeRows(list[i], depth))
+        i++
+        continue
       }
-    }
-
-    const behind = d.network === 0 ? networkRows(routed.get(d.address) ?? [], key, depth + 1) : []
-    if (match && !deviceMatches && behind.length === 0 && !(narrowed && shown.length > 0)) return []
-
-    // Under a filter, a device is opened to show what matched inside it.
-    const forced = match !== null && ((narrowed && shown.length > 0) || behind.length > 0)
-    const open = forced || isOpen(key, 'device')
-    const rows: Row[] = [{ kind: 'device', key, depth, device: d, open }]
-    if (!open) return rows
-
-    rows.push(...behind)
-    const state = d.objects
-    if (state.state === 'error') {
-      rows.push({ kind: 'note', key: `${key}/error`, depth: depth + 1, tone: 'error', text: state.error ?? 'Could not read the objects' })
-    } else if (!list || (state.state === 'loading' && list.objects.length === 0)) {
-      const text = state.total > 0 ? `Reading the object list… ${state.total} objects` : 'Reading the object list…'
-      rows.push({ kind: 'note', key: `${key}/busy`, depth: depth + 1, tone: 'busy', text })
-    } else if (list.objects.length === 0) {
-      rows.push({ kind: 'note', key: `${key}/none`, depth: depth + 1, tone: 'muted', text: 'No objects' })
-    }
-
-    for (let i = 0; i < shown.length; ) {
       let end = i
-      while (end < shown.length && shown[end].type === shown[i].type) end++
-      const groupKey = `${key}/t${shown[i].type}`
-      const groupOpen = narrowed || isOpen(groupKey, 'group')
-      rows.push({
-        kind: 'group', key: groupKey, depth: depth + 1,
-        typeName: shown[i].typeName, count: end - i, open: groupOpen,
-      })
-      if (groupOpen) {
-        for (const o of shown.slice(i, end)) {
-          rows.push({ kind: 'object', key: objectRowKey(d.id, o), depth: depth + 2, device: d.id, object: o })
-        }
+      while (end < list.length && list[end].group === group) end++
+      const members = list.slice(i, end)
+      const under = members.flatMap((m) => nodeRows(m, depth + 1))
+      // A parent that matches by itself keeps all its groups unless some
+      // of their members match too.
+      const anyMatch = members.some(nodeMatches)
+      if (match && under.length === 0 && !(parentMatches && !anyMatch)) {
+        i = end
+        continue
       }
+      const shown = match && anyMatch ? under : match && parentMatches ? members.flatMap((m) => nodeRowsPlain(m, depth + 1)) : under
+      const key = groupKey(parent, group)
+      const open = (match !== null && anyMatch) || isOpen(key)
+      rows.push({ kind: 'group', key, depth, name: group, count: members.length, open })
+      if (open) rows.push(...shown)
       i = end
     }
     return rows
   }
 
-  // networkRows lays out the devices behind one router, by network.
-  const networkRows = (behind: Device[], parentKey: string, depth: number): Row[] => {
-    const rows: Row[] = []
-    const networks = [...new Set(behind.map((d) => d.network))].sort((a, b) => a - b)
-    for (const network of networks) {
-      const key = `${parentKey}/n${network}`
-      const members = behind.filter((d) => d.network === network)
-      const under = members.flatMap((d) => deviceRows(d, depth + 1))
-      if (match && under.length === 0) continue
-      const open = match !== null || isOpen(key, 'network')
-      rows.push({ kind: 'network', key, depth, network, count: members.length, open })
-      if (open) rows.push(...under)
-    }
-    return rows
-  }
+  // nodeRowsPlain is nodeRows with the filter set aside, for members kept
+  // because their parent matched.
+  const nodeRowsPlain = (n: Node, depth: number): Row[] => [
+    { kind: 'node', key: n.id, depth, node: n, open: false, count: (children.get(n.id) ?? []).length },
+  ]
 
-  const rows: Row[] = []
-  for (const d of local) rows.push(...deviceRows(d, 0))
-
-  // Routers that only the devices behind them have told us about.
-  const known = new Set(local.map((d) => d.address))
-  for (const address of [...routed.keys()].filter((a) => !known.has(a)).sort()) {
-    const key = `r${address}`
-    const under = networkRows(routed.get(address)!, key, 1)
-    if (match && under.length === 0) continue
-    const open = match !== null || isOpen(key, 'router')
-    rows.push({ kind: 'router', key, depth: 0, address, open })
-    if (open) rows.push(...under)
-  }
-  return rows
+  return listRows(children.get('') ?? [], '', 0, false)
 }
 
 // parentOf finds the row a row hangs off: the nearest one above it that is

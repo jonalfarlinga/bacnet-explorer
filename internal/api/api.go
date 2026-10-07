@@ -1,171 +1,152 @@
-// Package api serves the explorer's HTTP API and its web UI.
+// Package api serves the explorer's HTTP API and its web UI. It knows nodes
+// and sources, not protocols.
 package api
 
 import (
 	"context"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"mime"
 	"net/http"
-	"net/netip"
-	"strconv"
 	"strings"
 	"time"
 
-	"github.com/jonalfarlinga/bacnet/client"
-	"github.com/jonalfarlinga/bacnet/internal/discovery"
+	"github.com/jonalfarlinga/bacnet/internal/explorer"
 )
 
 // Config is what the API serves.
 type Config struct {
-	Service *discovery.Service
-	// Select opens the BACnet socket on the named adapter. It is nil when the
-	// adapter cannot be changed, as with simulated devices.
-	Select func(adapter string) error
+	Registry *explorer.Registry
 	// UI holds the built web UI, with index.html at its root.
 	UI fs.FS
 }
 
-type adapter struct {
-	Name      string `json:"name"`
-	Address   string `json:"address"`
-	Broadcast string `json:"broadcast"`
-}
-
-type status struct {
-	Transport *discovery.Transport `json:"transport"`
-	// Adapters lists what the BACnet socket can be opened on. It is empty
-	// when the adapter cannot be changed.
-	Adapters []adapter `json:"adapters"`
-}
-
 // New returns the handler for everything the explorer serves.
 func New(cfg Config) http.Handler {
-	s := cfg.Service
+	reg := cfg.Registry
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("GET /api/status", func(w http.ResponseWriter, r *http.Request) {
-		st := status{Transport: s.Transport(), Adapters: []adapter{}}
-		if cfg.Select != nil {
-			list, err := client.Interfaces()
-			if err != nil {
-				fail(w, err)
-				return
-			}
-			for _, i := range list {
-				st.Adapters = append(st.Adapters, adapter{
-					Name: i.Name, Address: i.Addr.String(), Broadcast: i.Broadcast.String(),
-				})
-			}
-		}
-		reply(w, st)
+	// ---- sources ----
+
+	mux.HandleFunc("GET /api/sources", func(w http.ResponseWriter, r *http.Request) {
+		reply(w, reg.Sources())
 	})
 
-	mux.HandleFunc("POST /api/transport", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /api/sources", func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
-			Adapter string `json:"adapter"`
+			Kind     string          `json:"kind"`
+			Settings explorer.Values `json:"settings"`
 		}
 		if !readJSON(w, r, &body) {
 			return
 		}
-		if cfg.Select == nil {
-			http.Error(w, "the adapter cannot be changed", http.StatusConflict)
-			return
-		}
-		if err := cfg.Select(body.Adapter); err != nil {
+		if err := reg.Open(r.Context(), body.Kind, body.Settings); err != nil {
 			fail(w, err)
 			return
 		}
-		reply(w, s.Transport())
+		reply(w, reg.Sources())
 	})
 
-	mux.HandleFunc("POST /api/discovery", func(w http.ResponseWriter, r *http.Request) {
-		if !readJSON(w, r, nil) {
-			return
-		}
-		if err := s.Scan(); err != nil {
+	mux.HandleFunc("DELETE /api/sources/{kind}", func(w http.ResponseWriter, r *http.Request) {
+		if err := reg.Close(r.PathValue("kind")); err != nil {
 			fail(w, err)
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
 	})
 
-	mux.HandleFunc("GET /api/devices", func(w http.ResponseWriter, r *http.Request) {
-		reply(w, s.Devices())
+	mux.HandleFunc("POST /api/sources/{kind}/discover", func(w http.ResponseWriter, r *http.Request) {
+		if !readJSON(w, r, nil) {
+			return
+		}
+		if err := reg.Discover(r.Context(), r.PathValue("kind")); err != nil {
+			fail(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
 	})
 
-	// Adds a device by its address, for one that no Who-Is reaches.
-	mux.HandleFunc("POST /api/devices", func(w http.ResponseWriter, r *http.Request) {
+	// Adds a node by hand, from the source's add form.
+	mux.HandleFunc("POST /api/sources/{kind}/nodes", func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
-			// Address is the device's IP, with a port after a colon when it
-			// is not 47808; for a routed device, its router's.
-			Address  string `json:"address"`
-			Instance uint32 `json:"instance"` // 0 to read it from the device
-			Network  uint16 `json:"network"`  // 0 for a device at Address itself
-			MAC      string `json:"mac"`      // the MAC on Network, in hex
+			Values explorer.Values `json:"values"`
 		}
 		if !readJSON(w, r, &body) {
 			return
 		}
-		addr, err := ParseAddress(body.Address, body.Network, body.MAC)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		if body.Instance > client.WildcardInstance {
-			http.Error(w, "bad instance", http.StatusBadRequest)
-			return
-		}
 		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 		defer cancel()
-		dev, err := s.Add(ctx, addr, body.Instance)
+		n, err := reg.Add(ctx, r.PathValue("kind"), body.Values)
 		if err != nil {
 			fail(w, err)
 			return
 		}
-		reply(w, dev)
+		reply(w, n)
 	})
 
-	objectsOf := func(refresh bool) http.HandlerFunc {
+	// ---- nodes ----
+	// Node IDs hold slashes, so they travel as the id query parameter.
+
+	mux.HandleFunc("GET /api/nodes", func(w http.ResponseWriter, r *http.Request) {
+		reply(w, reg.Nodes())
+	})
+
+	mux.HandleFunc("GET /api/node", func(w http.ResponseWriter, r *http.Request) {
+		id, ok := nodeID(w, r)
+		if !ok {
+			return
+		}
+		n, found := reg.Node(id)
+		if !found {
+			fail(w, explorer.ErrUnknownNode)
+			return
+		}
+		reply(w, n)
+	})
+
+	childrenOf := func(refresh bool) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
-			id, ok := number(w, r, "id", client.WildcardInstance-1)
+			id, ok := nodeID(w, r)
 			if !ok {
 				return
 			}
 			if refresh && !readJSON(w, r, nil) {
 				return
 			}
-			rev, objs, err := s.Objects(uint32(id), refresh)
+			rev, nodes, err := reg.Children(id, refresh)
 			if err != nil {
 				fail(w, err)
 				return
 			}
-			reply(w, map[string]any{"rev": rev, "objects": objs})
+			if nodes == nil {
+				nodes = []explorer.Node{}
+			}
+			reply(w, map[string]any{"rev": rev, "nodes": nodes})
 		}
 	}
-	mux.HandleFunc("GET /api/devices/{id}/objects", objectsOf(false))
-	mux.HandleFunc("POST /api/devices/{id}/refresh", objectsOf(true))
+	mux.HandleFunc("GET /api/node/children", childrenOf(false))
+	mux.HandleFunc("POST /api/node/refresh", childrenOf(true))
 
-	mux.HandleFunc("GET /api/devices/{id}/objects/{type}/{instance}/properties", func(w http.ResponseWriter, r *http.Request) {
-		id, ok1 := number(w, r, "id", client.WildcardInstance-1)
-		typ, ok2 := number(w, r, "type", 1023)
-		inst, ok3 := number(w, r, "instance", client.WildcardInstance)
-		if !ok1 || !ok2 || !ok3 {
+	mux.HandleFunc("GET /api/node/detail", func(w http.ResponseWriter, r *http.Request) {
+		id, ok := nodeID(w, r)
+		if !ok {
 			return
 		}
-		props, err := s.Properties(r.Context(), uint32(id), client.ObjectID{Type: uint16(typ), Instance: uint32(inst)})
+		d, err := reg.Detail(r.Context(), id)
 		if err != nil {
 			fail(w, err)
 			return
 		}
-		reply(w, map[string]any{"properties": props, "readAt": time.Now()})
+		if d.Rows == nil {
+			d.Rows = []explorer.DetailRow{}
+		}
+		reply(w, d)
 	})
 
 	mux.HandleFunc("GET /api/events", func(w http.ResponseWriter, r *http.Request) {
-		events(w, r, s)
+		events(w, r, reg)
 	})
 
 	mux.HandleFunc("/api/", http.NotFound)
@@ -173,15 +154,24 @@ func New(cfg Config) http.Handler {
 	return mux
 }
 
-// events streams the service's events as server-sent events. The stream ends
-// when the client falls too far behind; it reconnects and reloads.
-func events(w http.ResponseWriter, r *http.Request, s *discovery.Service) {
+func nodeID(w http.ResponseWriter, r *http.Request) (explorer.NodeID, bool) {
+	id := r.URL.Query().Get("id")
+	if id == "" || !strings.Contains(id, ":") || len(id) > 512 {
+		http.Error(w, "bad node id", http.StatusBadRequest)
+		return "", false
+	}
+	return explorer.NodeID(id), true
+}
+
+// events streams the registry's events as server-sent events. The stream
+// ends when the client falls too far behind; it reconnects and reloads.
+func events(w http.ResponseWriter, r *http.Request, reg *explorer.Registry) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming is not supported", http.StatusInternalServerError)
 		return
 	}
-	ch, cancel := s.Subscribe()
+	ch, cancel := reg.Subscribe()
 	defer cancel()
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -230,32 +220,6 @@ func ui(dist fs.FS) http.Handler {
 	})
 }
 
-// ParseAddress reads a device address as a user writes it: an IP with an
-// optional port, and for a device behind a router, its network number and
-// MAC in hex.
-func ParseAddress(address string, network uint16, mac string) (client.Address, error) {
-	address = strings.TrimSpace(address)
-	ip, err := netip.ParseAddrPort(address)
-	if err != nil {
-		a, err := netip.ParseAddr(address)
-		if err != nil {
-			return client.Address{}, fmt.Errorf("%q is not an IP address or IP:port", address)
-		}
-		ip = netip.AddrPortFrom(a, client.DefaultPort)
-	}
-	addr := client.Address{IP: ip, Net: network}
-	if network != 0 {
-		b, err := hex.DecodeString(strings.TrimSpace(mac))
-		if err != nil || len(b) == 0 || len(b) > 8 {
-			return client.Address{}, fmt.Errorf("MAC %q is not 1 to 8 bytes in hex", mac)
-		}
-		addr.MAC = b
-	} else if strings.TrimSpace(mac) != "" {
-		return client.Address{}, errors.New("a MAC goes with a network number")
-	}
-	return addr, nil
-}
-
 func reply(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
@@ -265,10 +229,12 @@ func reply(w http.ResponseWriter, v any) {
 func fail(w http.ResponseWriter, err error) {
 	code := http.StatusBadGateway
 	switch {
-	case errors.Is(err, discovery.ErrUnknownDevice):
+	case errors.Is(err, explorer.ErrUnknownNode), errors.Is(err, explorer.ErrUnknownKind):
 		code = http.StatusNotFound
-	case errors.Is(err, discovery.ErrNoTransport):
+	case errors.Is(err, explorer.ErrNotOpen):
 		code = http.StatusConflict
+	case errors.Is(err, explorer.ErrNotSupported):
+		code = http.StatusBadRequest
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
@@ -291,13 +257,4 @@ func readJSON(w http.ResponseWriter, r *http.Request, v any) bool {
 		return false
 	}
 	return true
-}
-
-func number(w http.ResponseWriter, r *http.Request, name string, limit uint64) (uint64, bool) {
-	n, err := strconv.ParseUint(r.PathValue(name), 10, 32)
-	if err != nil || n > limit {
-		http.Error(w, "bad "+name, http.StatusBadRequest)
-		return 0, false
-	}
-	return n, true
 }

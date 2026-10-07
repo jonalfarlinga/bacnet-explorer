@@ -1,93 +1,113 @@
-// Types and calls of the explorer's HTTP API (internal/api).
+// Types and calls of the explorer's HTTP API (internal/api). The UI knows
+// nodes and sources; what they are made of is the source's business.
 
-export interface Transport {
-  name: string
-  local: string
-  broadcast: string
-  simulated: boolean
+export type NodeID = string
+export type Kind = 'device' | 'group' | 'point'
+export type Family = 'analog' | 'binary' | 'multistate' | 'text' | 'other'
+export type Quality = 'good' | 'stale' | 'comm-fail' | 'error'
+
+export interface Fact {
+  label: string
+  value: string
+  mono?: boolean
 }
 
-export interface Adapter {
-  name: string
-  address: string
-  broadcast: string
+export interface Reading {
+  text: string
+  number?: number
+  units?: string
+  flags?: string[]
+  quality: Quality
+  at: string
 }
 
-export interface Status {
-  transport: Transport | null
-  adapters: Adapter[]
-}
-
-export interface ObjectsState {
-  state: 'idle' | 'loading' | 'ready' | 'error'
+export interface ChildrenState {
+  state: 'none' | 'unknown' | 'loading' | 'ready' | 'error'
   total: number
   done: number
   error?: string
 }
 
-export interface Device {
-  id: number
-  address: string
-  network: number
-  mac?: string
-  maxApdu: number
-  segmentation: string
-  vendorId: number
-  // Set for a device that was added by its address rather than heard
-  // announcing itself.
-  added?: boolean
-  name?: string
-  vendorName?: string
-  modelName?: string
-  firmware?: string
-  software?: string
-  location?: string
-  description?: string
-  infoError?: string
-  objects: ObjectsState
-}
-
-export interface BacnetObject {
-  type: number
-  typeName: string
-  abbr: string
-  instance: number
-  name?: string
-  description?: string
-  value?: string
-  units?: string
-  flags?: string[]
-  loaded: boolean
+export interface Node {
+  id: NodeID
+  parent?: NodeID
+  source: string
+  kind: Kind
+  label: string
+  sublabel?: string
+  meta?: string
+  tag?: string
+  family?: Family
+  group?: string
+  order: number
+  facts?: Fact[]
+  reading?: Reading
+  children: ChildrenState
+  listed?: boolean
+  pending?: boolean
   error?: string
 }
 
-export interface ObjectList {
+export interface ChildrenList {
   rev: number
-  objects: BacnetObject[]
+  nodes: Node[]
 }
 
-export interface ObjectsEvent extends ObjectList {
-  deviceId: number
+export interface ChildrenEvent extends ChildrenList {
+  parent: NodeID
   replace: boolean
 }
 
-export interface Property {
-  id: number
+export interface DetailRow {
   name: string
-  index?: number
   value: string
   items?: string[]
   error?: string
 }
 
-export interface PropertyList {
-  properties: Property[]
+export interface Detail {
+  rows: DetailRow[]
   readAt: string
 }
 
-async function request<T>(path: string, body?: unknown): Promise<T> {
+export interface Option {
+  value: string
+  label: string
+  hint?: string
+}
+
+export interface Field {
+  key: string
+  label: string
+  hint?: string
+  type: 'text' | 'number' | 'select'
+  options?: Option[]
+  required?: boolean
+  default?: string
+}
+
+export interface SourceStatus {
+  open: boolean
+  summary?: string
+  lines?: Fact[]
+}
+
+export interface Source {
+  kind: string
+  title: string
+  blurb?: string
+  settings: Field[]
+  addForm: Field[]
+  canDiscover: boolean
+  discoverHint?: string
+  status: SourceStatus
+}
+
+export type Values = Record<string, string>
+
+async function request<T>(path: string, body?: unknown, method?: string): Promise<T> {
   const res = await fetch(path, {
-    method: body === undefined ? 'GET' : 'POST',
+    method: method ?? (body === undefined ? 'GET' : 'POST'),
     headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
     body: body === undefined ? undefined : JSON.stringify(body),
   })
@@ -104,21 +124,16 @@ async function request<T>(path: string, body?: unknown): Promise<T> {
   return res.status === 204 ? (undefined as T) : res.json()
 }
 
+const withID = (path: string, id: NodeID) => `${path}?id=${encodeURIComponent(id)}`
+
 export const api = {
-  status: () => request<Status>('/api/status'),
-  selectAdapter: (adapter: string) => request<Transport>('/api/transport', { adapter }),
-  scan: () => request<void>('/api/discovery', {}),
-  // Adds a device by its IP (with :port when not 47808), for one that no
-  // Who-Is reaches. The device's instance is read from it.
-  addDevice: (address: string) => request<Device>('/api/devices', { address }),
-  objects: (device: number) => request<ObjectList>(`/api/devices/${device}/objects`),
-  reloadObjects: (device: number) => request<ObjectList>(`/api/devices/${device}/refresh`, {}),
-  properties: (device: number, type: number, instance: number) =>
-    request<PropertyList>(`/api/devices/${device}/objects/${type}/${instance}/properties`),
-}
-
-export const objectKey = (o: { type: number; instance: number }) => `${o.type}:${o.instance}`
-
-export function deviceLabel(d: Device): string {
-  return d.name || `Device ${d.id}`
+  sources: () => request<Source[]>('/api/sources'),
+  openSource: (kind: string, settings: Values) => request<Source[]>('/api/sources', { kind, settings }),
+  closeSource: (kind: string) => request<void>(`/api/sources/${encodeURIComponent(kind)}`, undefined, 'DELETE'),
+  discover: (kind: string) => request<void>(`/api/sources/${encodeURIComponent(kind)}/discover`, {}),
+  addNode: (kind: string, values: Values) => request<Node>(`/api/sources/${encodeURIComponent(kind)}/nodes`, { values }),
+  nodes: () => request<Node[]>('/api/nodes'),
+  children: (id: NodeID) => request<ChildrenList>(withID('/api/node/children', id)),
+  refresh: (id: NodeID) => request<ChildrenList>(withID('/api/node/refresh', id), {}),
+  detail: (id: NodeID) => request<Detail>(withID('/api/node/detail', id)),
 }

@@ -53,7 +53,8 @@ Package layout (proposed):
 |---|---|
 | `client/` (library) | Transport, request/response correlation, segmentation, BBMD, routing. Reusable outside the app. |
 | `cmd/explorer/` | `main`: config, wiring, graceful shutdown |
-| `internal/discovery` | Who-Is sweeps, I-Am handling, device/object enumeration |
+| `internal/explorer` | The source-neutral core: node model, `Source` interface, registry and events (see explorer-sources-spec.md) |
+| `internal/source/bacnet` | The BACnet source: Who-Is sweeps, I-Am handling, add-by-address, device/object enumeration, rendering |
 | `internal/poller` | Scheduling, RPM batching, quality/backoff |
 | `internal/store` | Postgres schema, migrations, queries, batched sample writer |
 | `internal/api` | REST handlers, SSE live-value stream |

@@ -1,4 +1,4 @@
-package discovery
+package bacnet
 
 import (
 	"encoding/hex"

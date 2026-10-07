@@ -1,14 +1,18 @@
 import { useEffect, useState } from 'react'
 import { useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query'
-import { api, objectKey, type Device, type ObjectList, type ObjectsEvent } from './api'
+import { api, type ChildrenEvent, type ChildrenList, type Node, type NodeID } from './api'
 
-export const devicesKey = ['devices'] as const
-export const objectsKey = (device: number) => ['objects', device] as const
+export const nodesKey = ['nodes'] as const
+export const revKey = (id: NodeID) => ['rev', id] as const
+
+// Nodes is everything the UI knows, by ID. The tree is built from it: a
+// node's children are the nodes whose parent it is.
+export type Nodes = ReadonlyMap<NodeID, Node>
 
 // useLive keeps the query cache in step with the server's event stream, and
-// reports whether the stream is connected. The stream opens with every
-// device the server knows; after that come single devices and objects as the
-// server learns of them. onReset runs when the server changes network, which
+// reports whether the stream is connected. The stream opens with every node
+// the server knows; after that come single nodes and lists of children as
+// the server learns of them. onReset runs when a source starts over, which
 // makes everything shown so far stale.
 export function useLive(onReset: () => void): boolean {
   const qc = useQueryClient()
@@ -19,77 +23,106 @@ export function useLive(onReset: () => void): boolean {
     es.onopen = () => setConnected(true)
     es.onerror = () => setConnected(false) // the browser reconnects by itself
 
-    es.addEventListener('devices', (e) => {
-      qc.setQueryData<Device[]>(devicesKey, JSON.parse(e.data))
+    es.addEventListener('nodes', (e) => {
+      const list: Node[] = JSON.parse(e.data)
+      qc.setQueryData<Nodes>(nodesKey, new Map(list.map((n) => [n.id, n])))
       // Events may have been missed while the stream was down.
-      void qc.resetQueries({ queryKey: ['objects'] })
-      void qc.invalidateQueries({ queryKey: ['status'] })
+      qc.removeQueries({ queryKey: ['rev'] })
+      void qc.invalidateQueries({ queryKey: ['sources'] })
     })
-    es.addEventListener('device', (e) => {
-      const device: Device = JSON.parse(e.data)
-      qc.setQueryData<Device[]>(devicesKey, (list = []) => {
-        const i = list.findIndex((d) => d.id === device.id)
-        if (i < 0) return [...list, device].sort((a, b) => a.id - b.id)
-        const next = list.slice()
-        next[i] = device
+    es.addEventListener('node', (e) => {
+      const node: Node = JSON.parse(e.data)
+      qc.setQueryData<Nodes>(nodesKey, (nodes = new Map()) => new Map(nodes).set(node.id, node))
+    })
+    es.addEventListener('children', (e) => applyChildren(qc, JSON.parse(e.data)))
+    es.addEventListener('remove', (e) => {
+      const id: NodeID = JSON.parse(e.data)
+      qc.setQueryData<Nodes>(nodesKey, (nodes = new Map()) => {
+        const next = new Map(nodes)
+        dropUnder(next, id, false)
+        next.delete(id)
         return next
       })
     })
-    es.addEventListener('objects', (e) => applyObjects(qc, JSON.parse(e.data)))
+    es.addEventListener('source', () => {
+      void qc.invalidateQueries({ queryKey: ['sources'] })
+    })
     es.addEventListener('reset', () => {
-      qc.setQueryData<Device[]>(devicesKey, [])
-      qc.removeQueries({ queryKey: ['objects'] })
-      qc.removeQueries({ queryKey: ['properties'] })
-      void qc.invalidateQueries({ queryKey: ['status'] })
+      qc.setQueryData<Nodes>(nodesKey, new Map())
+      qc.removeQueries({ queryKey: ['rev'] })
+      qc.removeQueries({ queryKey: ['detail'] })
+      void qc.invalidateQueries({ queryKey: ['sources'] })
       onReset()
     })
     return () => es.close()
-  }, [qc])
+  }, [qc, onReset])
 
   return connected
 }
 
-// applyObjects merges an event into the cached objects of its device. Each
-// event carries the revision it brings the list to; one that does not follow
+// dropUnder removes what is under a node from the map, with everything
+// under that: only the children that came in a list, with listedOnly, or
+// every child. A list replaces only listed children; what the source
+// announced on its own, such as a network behind a router, stays.
+function dropUnder(nodes: Map<NodeID, Node>, parent: NodeID, listedOnly: boolean) {
+  for (const n of [...nodes.values()]) {
+    if (n.parent === parent && (n.listed || !listedOnly)) {
+      dropUnder(nodes, n.id, false)
+      nodes.delete(n.id)
+    }
+  }
+}
+
+// applyChildren merges an event into the cached nodes. Each event carries
+// the revision it brings the parent's children to; one that does not follow
 // the cached revision means something was missed, and the list is fetched
 // again instead.
-function applyObjects(qc: QueryClient, ev: ObjectsEvent) {
-  const key = objectsKey(ev.deviceId)
-  const cached = qc.getQueryData<ObjectList>(key)
-  if (ev.replace) {
-    if (!cached || ev.rev > cached.rev) qc.setQueryData<ObjectList>(key, { rev: ev.rev, objects: ev.objects })
+function applyChildren(qc: QueryClient, ev: ChildrenEvent) {
+  const cached = qc.getQueryData<number>(revKey(ev.parent))
+  if (!ev.replace && cached !== undefined && ev.rev !== cached + 1) {
+    void qc.invalidateQueries({ queryKey: revKey(ev.parent) })
     return
   }
-  if (!cached) return // nobody has asked for this device's objects yet
-  if (ev.rev <= cached.rev) return
-  if (ev.rev !== cached.rev + 1) {
-    void qc.invalidateQueries({ queryKey: key })
+  if (!ev.replace && cached === undefined) {
+    // Nobody has asked for this node's children yet; the list is fetched
+    // when they do.
     return
   }
-  const changed = new Map(ev.objects.map((o) => [objectKey(o), o]))
-  qc.setQueryData<ObjectList>(key, {
-    rev: ev.rev,
-    objects: cached.objects.map((o) => changed.get(objectKey(o)) ?? o),
+  qc.setQueryData<number>(revKey(ev.parent), ev.rev)
+  qc.setQueryData<Nodes>(nodesKey, (nodes = new Map()) => {
+    const next = new Map(nodes)
+    if (ev.replace) dropUnder(next, ev.parent, true)
+    for (const n of ev.nodes) next.set(n.id, n)
+    return next
   })
 }
 
-export function useDevices(): Device[] {
+export function useNodes(): Nodes {
   // The event stream fills this; there is nothing to fetch.
-  const { data } = useQuery<Device[]>({ queryKey: devicesKey, queryFn: () => [], enabled: false })
-  return data ?? []
+  const { data } = useQuery<Nodes>({ queryKey: nodesKey, queryFn: () => new Map(), enabled: false })
+  return data ?? new Map()
 }
 
-// objectsQuery reads a device's objects. The first read makes the server
-// start discovering them; the rest arrive as events.
-export function objectsQuery(qc: QueryClient, device: number) {
+// childrenQuery reads a node's children. The first read makes the server
+// start reading them; the rest arrive as events. It resolves to the
+// revision, and puts the nodes in the map.
+export function childrenQuery(qc: QueryClient, id: NodeID) {
   return {
-    queryKey: objectsKey(device),
-    queryFn: async (): Promise<ObjectList> => keepNewer(qc, device, await api.objects(device)),
+    queryKey: revKey(id),
+    queryFn: async (): Promise<number> => takeChildren(qc, id, await api.children(id)),
   }
 }
 
-// keepNewer guards against a snapshot that events have already overtaken.
-export function keepNewer(qc: QueryClient, device: number, snapshot: ObjectList): ObjectList {
-  const cached = qc.getQueryData<ObjectList>(objectsKey(device))
-  return cached && cached.rev > snapshot.rev ? cached : snapshot
+// takeChildren puts a fetched list in the map, unless events have already
+// taken the node's children past it.
+export function takeChildren(qc: QueryClient, id: NodeID, list: ChildrenList): number {
+  const cached = qc.getQueryData<number>(revKey(id))
+  if (cached !== undefined && cached > list.rev) return cached
+  qc.setQueryData<Nodes>(nodesKey, (nodes = new Map()) => {
+    const next = new Map(nodes)
+    dropUnder(next, id, true)
+    for (const n of list.nodes) next.set(n.id, n)
+    return next
+  })
+  return list.rev
 }

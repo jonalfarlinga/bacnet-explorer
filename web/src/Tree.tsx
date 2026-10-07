@@ -1,28 +1,20 @@
 import { useRef, type KeyboardEvent } from 'react'
-import { deviceLabel, type BacnetObject, type Device } from './api'
-import { deviceRowKey, objectRowKey, parentOf, titleCase, type Row, type Selection } from './treeModel'
+import type { Node, NodeID } from './api'
+import { parentOf, type Row } from './treeModel'
 
 interface TreeProps {
   rows: Row[]
-  selection: Selection | null
-  // How many devices each router has behind it, by the router's address.
-  behind: ReadonlyMap<string, number>
-  onSelect: (s: Selection) => void
+  selection: NodeID | null
+  onSelect: (id: NodeID) => void
   onToggle: (key: string, open: boolean) => void
-}
-
-function selectedKey(s: Selection | null): string | null {
-  if (!s) return null
-  return s.kind === 'device' ? deviceRowKey(s.device) : objectRowKey(s.device, s)
 }
 
 const canOpen = (row: Row): row is Row & { open: boolean } => 'open' in row
 
-export function Tree({ rows, selection, behind, onSelect, onToggle }: TreeProps) {
+export function Tree({ rows, selection, onSelect, onToggle }: TreeProps) {
   const ref = useRef<HTMLDivElement>(null)
-  const current = selectedKey(selection)
   // The row that Tab lands on: the selected one if it is showing.
-  const tabStop = rows.some((r) => r.key === current) ? current : rows.find((r) => r.kind !== 'note')?.key
+  const tabStop = rows.some((r) => r.key === selection) ? selection : rows.find((r) => r.kind !== 'note')?.key
 
   const focusRow = (index: number) => {
     const row = rows[index]
@@ -31,13 +23,11 @@ export function Tree({ rows, selection, behind, onSelect, onToggle }: TreeProps)
   }
 
   const activate = (row: Row) => {
-    if (row.kind === 'device') {
-      // Picking a device opens it, which is what makes the server read its
-      // objects.
-      onSelect({ kind: 'device', device: row.device.id })
-      if (!row.open) onToggle(row.key, true)
-    } else if (row.kind === 'object') {
-      onSelect({ kind: 'object', device: row.device, type: row.object.type, instance: row.object.instance })
+    if (row.kind === 'node') {
+      onSelect(row.node.id)
+      // Picking a node with children opens it, which is what makes the
+      // server read them.
+      if (row.node.children.state !== 'none' && !row.open) onToggle(row.key, true)
     } else if (canOpen(row)) {
       onToggle(row.key, !row.open)
     }
@@ -86,7 +76,7 @@ export function Tree({ rows, selection, behind, onSelect, onToggle }: TreeProps)
   }
 
   return (
-    <div className="tree" role="tree" aria-label="Devices and objects" ref={ref} onKeyDown={onKeyDown}>
+    <div className="tree" role="tree" aria-label="Devices and points" ref={ref} onKeyDown={onKeyDown}>
       {rows.map((row) => {
         if (row.kind === 'note') {
           return (
@@ -98,21 +88,23 @@ export function Tree({ rows, selection, behind, onSelect, onToggle }: TreeProps)
             </div>
           )
         }
-        const selected = row.key === current
+        const selected = row.key === selection
+        const openable = row.kind === 'group' || row.node.children.state !== 'none'
+        const rowClass = row.kind === 'group' ? 'group' : row.node.kind === 'point' ? 'object' : row.node.kind
         return (
           <div
             key={row.key}
             data-key={row.key}
-            className={`row ${row.kind}${selected ? ' selected' : ''}`}
+            className={`row ${rowClass}${selected ? ' selected' : ''}`}
             role="treeitem"
             aria-level={row.depth + 1}
             aria-selected={selected}
-            aria-expanded={canOpen(row) ? row.open : undefined}
+            aria-expanded={openable ? row.open : undefined}
             tabIndex={row.key === tabStop ? 0 : -1}
             onClick={() => activate(row)}
           >
             <Guides depth={row.depth} />
-            {canOpen(row) ? (
+            {openable ? (
               <span
                 className={`twisty${row.open ? ' open' : ''}`}
                 onClick={(e) => {
@@ -127,26 +119,14 @@ export function Tree({ rows, selection, behind, onSelect, onToggle }: TreeProps)
             ) : (
               <span className="twisty" />
             )}
-            {row.kind === 'device' && <DeviceRow device={row.device} behind={behind.get(row.device.address) ?? 0} />}
-            {row.kind === 'router' && (
+            {row.kind === 'group' ? (
               <>
-                <span className="label strong">Router</span>
-                <span className="sub mono">{row.address}</span>
-              </>
-            )}
-            {row.kind === 'network' && (
-              <>
-                <span className="label strong">Network {row.network}</span>
-                <span className="sub">{plural(row.count, 'device')}</span>
-              </>
-            )}
-            {row.kind === 'group' && (
-              <>
-                <span className="label">{titleCase(row.typeName)}</span>
+                <span className="label">{row.name}</span>
                 <span className="sub">{row.count}</span>
               </>
+            ) : (
+              <NodeRow node={row.node} count={row.count} />
             )}
-            {row.kind === 'object' && <ObjectRow object={row.object} />}
           </div>
         )
       })}
@@ -166,29 +146,6 @@ function Guides({ depth }: { depth: number }) {
 
 export const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
 
-function DeviceRow({ device, behind }: { device: Device; behind: number }) {
-  const state = device.objects
-  return (
-    <>
-      <svg className="glyph" viewBox="0 0 16 16" aria-hidden>
-        <rect x="2" y="3" width="12" height="10" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.3" />
-        <path d="M5 6.5h3M5 9.5h6" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
-      </svg>
-      <span className="label strong">{deviceLabel(device)}</span>
-      <span className="sub mono">#{device.id}</span>
-      <span className="spacer" />
-      {behind > 0 && device.network === 0 && <span className="pill">routes {plural(behind, 'device')}</span>}
-      {state.state === 'loading' && (
-        <span className="sub">{state.total > 0 ? `${state.done}/${state.total}` : ''}</span>
-      )}
-      {state.state === 'loading' && <span className="spinner" aria-label="Reading objects" />}
-      {state.state === 'ready' && <span className="sub">{plural(state.total, 'object')}</span>}
-      {state.state === 'error' && <span className="flag alarm">error</span>}
-      <span className="sub mono address">{device.network === 0 ? device.address : `MAC ${device.mac}`}</span>
-    </>
-  )
-}
-
 const flagClass: Record<string, string> = {
   'in alarm': 'alarm',
   fault: 'fault',
@@ -196,39 +153,45 @@ const flagClass: Record<string, string> = {
   'out of service': 'oos',
 }
 
-export function family(o: { typeName: string }): string {
-  if (o.typeName.startsWith('analog') || o.typeName.endsWith('analog-value')) return 'analog'
-  if (o.typeName.startsWith('binary')) return 'binary'
-  if (o.typeName.startsWith('multi-state')) return 'multistate'
-  return 'other'
-}
-
-function ObjectRow({ object: o }: { object: BacnetObject }) {
+function NodeRow({ node: n, count }: { node: Node; count: number }) {
+  const state = n.children
+  const strong = n.kind !== 'point'
   return (
     <>
-      <span className={`chip ${family(o)}`}>{o.abbr}</span>
-      {o.name ? (
-        <span className="label" title={o.description || undefined}>
-          {o.name}
-        </span>
-      ) : (
-        <span className={`label ${o.loaded ? 'unnamed' : 'pending'}`} title={o.error}>
-          {o.typeName}
-        </span>
+      {n.kind === 'device' && (
+        <svg className="glyph" viewBox="0 0 16 16" aria-hidden>
+          <rect x="2" y="3" width="12" height="10" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.3" />
+          <path d="M5 6.5h3M5 9.5h6" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+        </svg>
       )}
-      <span className="sub mono">{o.instance}</span>
+      {n.tag && <span className={`chip ${n.family ?? 'other'}`}>{n.tag}</span>}
+      <span
+        className={`label${strong ? ' strong' : ''}${n.pending ? ' pending' : ''}${n.error ? ' unnamed' : ''}`}
+        title={n.error || n.facts?.find((f) => f.label === 'Description')?.value || undefined}
+      >
+        {n.label}
+      </span>
+      {n.sublabel && <span className="sub mono">{n.sublabel}</span>}
       <span className="spacer" />
-      {o.flags?.map((f) => (
+      {n.kind === 'group' && <span className="sub">{plural(count, 'item')}</span>}
+      {state.state === 'loading' && n.kind !== 'group' && (
+        <span className="sub">{state.total > 0 ? `${state.done}/${state.total}` : ''}</span>
+      )}
+      {state.state === 'loading' && <span className="spinner" aria-label="Reading" />}
+      {state.state === 'ready' && n.kind !== 'group' && <span className="sub">{plural(state.total, 'item')}</span>}
+      {state.state === 'error' && <span className="flag alarm">error</span>}
+      {n.reading?.flags?.map((f) => (
         <span key={f} className={`flag ${flagClass[f] ?? ''}`}>
           {f}
         </span>
       ))}
-      {o.value !== undefined && o.value !== '' && (
+      {n.reading && n.reading.text !== '' && (
         <span className="value mono">
-          {o.value}
-          {o.units && <span className="units">{o.units}</span>}
+          {n.reading.text}
+          {n.reading.units && <span className="units">{n.reading.units}</span>}
         </span>
       )}
+      {n.meta && <span className="sub mono address">{n.meta}</span>}
     </>
   )
 }

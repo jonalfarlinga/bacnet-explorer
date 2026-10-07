@@ -1,12 +1,15 @@
-// explorer serves a web UI for browsing a BACnet network: the devices that
-// answer a Who-Is, and the objects and properties of the ones you open.
+// explorer serves a web UI for browsing what a building's equipment
+// exposes: today the BACnet/IP devices that answer a Who-Is or are given by
+// address, and the objects and properties of the ones you open.
 //
 //	go run ./cmd/explorer -interface "Ethernet 3"
 //	go run ./cmd/explorer -sim
 //
-// A network on another IP subnet is reached through its BBMD:
+// A network on another IP subnet is reached through its BBMD, or its devices
+// are listed by address:
 //
 //	go run ./cmd/explorer -interface "Ethernet 3" -bbmd 10.0.124.2
+//	go run ./cmd/explorer -interface "Ethernet 3" -add 10.22.60.3,10.22.60.4
 //
 // It is read-only on the BACnet network. It sends Who-Is, ReadProperty and
 // ReadPropertyMultiple requests, the Segment-ACKs that segmented replies
@@ -24,17 +27,18 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"net/netip"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/jonalfarlinga/bacnet/internal/api"
 	"github.com/jonalfarlinga/bacnet/client"
-	"github.com/jonalfarlinga/bacnet/internal/discovery"
 	"github.com/jonalfarlinga/bacnet/client/sim"
+	"github.com/jonalfarlinga/bacnet/internal/api"
+	"github.com/jonalfarlinga/bacnet/internal/explorer"
+	"github.com/jonalfarlinga/bacnet/internal/source/bacnet"
 	"github.com/jonalfarlinga/bacnet/web"
 )
 
@@ -60,19 +64,6 @@ func main() {
 	}
 }
 
-// parseAddrPort reads an IP address with an optional port, which is
-// defaultPort if left out.
-func parseAddrPort(s string, defaultPort uint16) (netip.AddrPort, error) {
-	if ap, err := netip.ParseAddrPort(s); err == nil {
-		return ap, nil
-	}
-	addr, err := netip.ParseAddr(s)
-	if err != nil {
-		return netip.AddrPort{}, fmt.Errorf("%q is not an IP address or IP:port", s)
-	}
-	return netip.AddrPortFrom(addr, defaultPort), nil
-}
-
 // inUse reports whether err is a bind to an address that is taken. The error
 // is a different one on each operating system, so it goes by the text.
 func inUse(err error) bool {
@@ -84,23 +75,14 @@ func run() error {
 	if *flagPort == 0 || *flagPort > 0xFFFF {
 		return fmt.Errorf("-port %d is not a UDP port", *flagPort)
 	}
-	var foreign *client.ForeignDeviceConfig
-	if *flagBBMD != "" {
-		bbmd, err := parseAddrPort(*flagBBMD, uint16(*flagPort))
-		if err != nil {
-			return fmt.Errorf("-bbmd: %w", err)
-		}
-		foreign = &client.ForeignDeviceConfig{BBMD: bbmd, TTL: *flagTTL}
-	}
-	var logger *slog.Logger
+	opts := bacnet.Options{Timeout: *flagTimeout, Retries: *flagRetries}
 	if *flagLog != "" {
 		var level slog.Level
 		if err := level.UnmarshalText([]byte(*flagLog)); err != nil {
 			return fmt.Errorf("-log: %w", err)
 		}
-		logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+		opts.Logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 	}
-	var onPacket func(client.PacketEvent)
 	if *flagFrames != "" {
 		f, err := os.OpenFile(*flagFrames, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 		if err != nil {
@@ -108,7 +90,7 @@ func run() error {
 		}
 		defer f.Close()
 		var mu sync.Mutex
-		onPacket = func(e client.PacketEvent) {
+		opts.OnPacket = func(e client.PacketEvent) {
 			dir := "to"
 			if e.Inbound {
 				dir = "from"
@@ -118,97 +100,74 @@ func run() error {
 			mu.Unlock()
 		}
 	}
-
-	var adds []client.Address
+	var adds []string
 	if *flagAdd != "" {
 		for _, s := range strings.Split(*flagAdd, ",") {
-			addr, err := api.ParseAddress(s, 0, "")
-			if err != nil {
+			if _, err := bacnet.ParseAddress(s, 0, ""); err != nil {
 				return fmt.Errorf("-add: %w", err)
 			}
-			adds = append(adds, addr)
+			adds = append(adds, strings.TrimSpace(s))
 		}
 	}
-	svc := discovery.New()
-	defer svc.Close()
-
-	// addAll lists the devices given with -add, once the socket is open.
-	addAll := func() {
-		for _, addr := range adds {
-			go func() {
-				ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-				defer cancel()
-				dev, err := svc.Add(ctx, addr, 0)
-				if err != nil {
-					fmt.Fprintln(os.Stderr, "explorer: -add:", err)
-					return
-				}
-				fmt.Printf("added device %d at %s\n", dev.ID, addr)
-			}()
-		}
-	}
-
-	use := func(ifc client.Interface) error {
-		cfg := ifc.Config(uint16(*flagPort))
-		cfg.Timeout, cfg.Retries = *flagTimeout, *flagRetries
-		cfg.ForeignDevice = foreign
-		cfg.Logger, cfg.OnPacket = logger, onPacket
-		if err := svc.Use(ifc.Name, cfg, false); err != nil {
-			if inUse(err) {
-				return fmt.Errorf("UDP port %d on %s (%s) is in use: another BACnet program on this machine has it open", cfg.Local.Port(), ifc.Name, cfg.Local.Addr())
-			}
-			return fmt.Errorf("opening UDP %s on %s: %w", cfg.Local, ifc.Name, err)
-		}
-		if foreign != nil {
-			fmt.Printf("BACnet/IP on %s (%s), a foreign device of the BBMD at %s\n", ifc.Name, cfg.Local, foreign.BBMD)
-		} else {
-			fmt.Printf("BACnet/IP on %s (%s), broadcasting to %s\n", ifc.Name, cfg.Local, cfg.Broadcast)
-		}
-		addAll()
-		return nil
-	}
-	cfg := api.Config{Service: svc, UI: web.UI()}
-
-	switch {
-	case *flagSim:
+	if *flagSim {
 		network, err := sim.Start()
 		if err != nil {
 			return fmt.Errorf("starting the simulated devices: %w", err)
 		}
 		defer network.Close()
-		err = svc.Use("Simulated devices", client.Config{
-			Local:     netip.MustParseAddrPort("127.0.0.1:0"),
-			Broadcast: network.Addr(),
-			Timeout:   *flagTimeout,
-			Retries:   *flagRetries,
-			Logger:    logger,
-			OnPacket:  onPacket,
-		}, true)
-		if err != nil {
-			return err
-		}
-		fmt.Println("browsing simulated devices at", network.Addr())
-		addAll()
-	case *flagInterface != "":
-		ifc, err := client.FindInterface(*flagInterface)
-		if err != nil {
-			return err
-		}
-		if err := use(ifc); err != nil {
-			return err
-		}
+		opts.Sim = network
 	}
-	if !*flagSim {
-		cfg.Select = func(adapter string) error {
-			ifc, err := client.FindInterface(adapter)
-			if err != nil {
-				return err
+
+	reg := explorer.New()
+	defer reg.CloseAll()
+	src := bacnet.New(opts)
+	reg.Register(src)
+	ctx := context.Background()
+
+	// open starts the BACnet source and lists what -add named.
+	open := func(settings explorer.Values) error {
+		if err := reg.Open(ctx, bacnet.Kind, settings); err != nil {
+			if inUse(err) {
+				return fmt.Errorf("UDP port %d on %s is in use: another BACnet program on this machine has it open", *flagPort, settings["adapter"])
 			}
-			return use(ifc)
+			return err
 		}
+		fmt.Println(src.Status().Summary)
+		for _, address := range adds {
+			go func() {
+				ctx, cancel := context.WithTimeout(ctx, time.Minute)
+				defer cancel()
+				n, err := reg.Add(ctx, bacnet.Kind, explorer.Values{"address": address})
+				if err != nil {
+					fmt.Fprintln(os.Stderr, "explorer: -add:", err)
+					return
+				}
+				fmt.Printf("added %s at %s\n", n.Label, address)
+			}()
+		}
+		return nil
+	}
+
+	settings := explorer.Values{
+		"adapter":  *flagInterface,
+		"port":     strconv.FormatUint(uint64(*flagPort), 10),
+		"bbmd":     *flagBBMD,
+		"bbmd_ttl": flagTTL.String(),
+	}
+	switch {
+	case *flagSim:
+		if err := open(nil); err != nil {
+			return err
+		}
+	case *flagInterface != "":
+		if err := open(settings); err != nil {
+			return err
+		}
+	default:
 		// With one adapter there is nothing to choose.
-		if list, err := client.Interfaces(); err == nil && len(list) == 1 && *flagInterface == "" {
-			if err := use(list[0]); err != nil {
+		if list, err := client.Interfaces(); err == nil && len(list) == 1 {
+			settings["adapter"] = list[0].Name
+			if err := open(settings); err != nil {
 				fmt.Fprintln(os.Stderr, "explorer:", err)
 			}
 		}
@@ -220,7 +179,7 @@ func run() error {
 	}
 	fmt.Printf("explorer is at http://%s\n", ln.Addr())
 
-	srv := &http.Server{Handler: api.New(cfg)}
+	srv := &http.Server{Handler: api.New(api.Config{Registry: reg, UI: web.UI()})}
 	interrupted := make(chan os.Signal, 1)
 	signal.Notify(interrupted, os.Interrupt)
 	go func() {

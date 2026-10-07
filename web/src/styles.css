@@ -718,36 +718,37 @@ ol {
   margin: 0 0 14px;
 }
 
-.adapters {
-  list-style: none;
+.source-form {
   display: grid;
-  gap: 8px;
-}
-
-.adapters button {
-  display: grid;
-  grid-template-columns: 1fr auto;
-  gap: 2px 12px;
-  width: 100%;
-  text-align: left;
-  font: inherit;
-  color: var(--text);
+  gap: 12px;
+  padding: 16px;
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 8px;
-  padding: 12px 14px;
-  cursor: pointer;
+  margin-bottom: 16px;
 }
 
-.adapters button:hover:not(:disabled) {
-  border-color: var(--accent);
+.source-form p {
+  color: var(--muted);
+  margin: 0;
 }
 
-.adapters button:disabled {
-  opacity: 0.6;
-  cursor: default;
+.source-form .filter {
+  margin: 0;
+  width: 100%;
 }
 
-.adapters .sub {
-  grid-column: 1 / -1;
+.source-form .button {
+  justify-self: start;
+}
+
+.field {
+  display: grid;
+  gap: 4px;
+}
+
+.field-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
 }

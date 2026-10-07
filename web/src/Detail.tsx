@@ -1,184 +1,124 @@
-import { useState, type ReactNode } from 'react'
+import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { api, deviceLabel, type BacnetObject, type Device, type ObjectList, type Property } from './api'
-import { keepNewer, objectsKey } from './live'
-import { family } from './Tree'
-import { titleCase } from './treeModel'
+import { api, type DetailRow, type Node } from './api'
+import { takeChildren } from './live'
+import { plural } from './Tree'
 
-export function EmptyDetail({ devices }: { devices: number }) {
+export function EmptyDetail({ nodes, discovering }: { nodes: number; discovering: boolean }) {
   return (
     <div className="empty">
-      <h2>{devices === 0 ? 'Listening for devices' : 'Pick a device'}</h2>
+      <h2>{nodes === 0 ? 'Listening' : 'Pick something'}</h2>
       <p>
-        {devices === 0
-          ? 'A Who-Is has gone out. Devices appear on the left as they answer; Scan sends another.'
-          : 'Picking a device reads its object list and hangs the objects under it. Pick an object to read its properties.'}
+        {nodes === 0
+          ? discovering
+            ? 'Devices appear on the left as they answer; Scan asks again.'
+            : 'Nothing has been found yet.'
+          : 'Picking a device reads what is under it. Picking a point reads everything about it.'}
       </p>
     </div>
   )
 }
 
-function Fact({ label, children }: { label: string; children: ReactNode }) {
-  if (children === undefined || children === null || children === '') return null
-  return (
-    <>
-      <dt>{label}</dt>
-      <dd>{children}</dd>
-    </>
-  )
+interface NodeDetailProps {
+  node: Node
+  // What hangs under the node, for the counts.
+  under: Node[]
 }
 
-interface DeviceDetailProps {
-  device: Device
-  // The device this one is reached through, if it is known.
-  router?: Device
-  objects?: ObjectList
-}
-
-export function DeviceDetail({ device, router, objects }: DeviceDetailProps) {
+export function NodeDetail({ node, under }: NodeDetailProps) {
   const qc = useQueryClient()
   const reload = useMutation({
-    mutationFn: () => api.reloadObjects(device.id),
-    onSuccess: (snapshot) => qc.setQueryData(objectsKey(device.id), keepNewer(qc, device.id, snapshot)),
+    mutationFn: () => api.refresh(node.id),
+    onSuccess: (list) => qc.setQueryData(['rev', node.id], takeChildren(qc, node.id, list)),
   })
-  const state = device.objects
+  const detail = useQuery({
+    queryKey: ['detail', node.id],
+    queryFn: () => api.detail(node.id),
+    // A node picked again is read again: the values are live.
+    staleTime: 0,
+    gcTime: 0,
+    enabled: node.kind !== 'group',
+  })
+  const state = node.children
+  const readAt = detail.data && new Date(detail.data.readAt)
 
-  const counts = new Map<string, number>()
-  for (const o of objects?.objects ?? []) counts.set(o.typeName, (counts.get(o.typeName) ?? 0) + 1)
+  const counts = new Map<string, Node[]>()
+  for (const c of under) {
+    const g = c.group ?? ''
+    counts.set(g, [...(counts.get(g) ?? []), c])
+  }
+  const eyebrow = [node.kind === 'point' ? node.group : node.kind === 'device' ? 'Device' : 'Group', node.sublabel]
+    .filter(Boolean)
+    .join(' ')
 
   return (
     <div className="detail">
       <header className="detail-head">
         <div>
-          <p className="eyebrow">Device {device.id}</p>
-          <h2>{deviceLabel(device)}</h2>
-          {device.description && <p className="lede">{device.description}</p>}
+          <p className="eyebrow">{eyebrow}</p>
+          <h2>{node.label}</h2>
+          {node.reading && (
+            <p className="lede">
+              <span className="mono">
+                {node.reading.text}
+                {node.reading.units && <span className="units"> {node.reading.units}</span>}
+              </span>
+              {node.reading.flags?.length ? ` · ${node.reading.flags.join(', ')}` : ''}
+            </p>
+          )}
         </div>
-        <button className="button" onClick={() => reload.mutate()} disabled={state.state === 'loading' || reload.isPending}>
-          Reload objects
-        </button>
+        <div className="detail-actions">
+          {state.state !== 'none' && (
+            <button className="button" onClick={() => reload.mutate()} disabled={state.state === 'loading' || reload.isPending}>
+              Reload
+            </button>
+          )}
+          {node.kind !== 'group' && readAt && !detail.isFetching && <span className="sub">Read at {readAt.toLocaleTimeString()}</span>}
+          {detail.isFetching && <span className="spinner" aria-label="Reading" />}
+          {node.kind !== 'group' && (
+            <button className="button" onClick={() => detail.refetch()} disabled={detail.isFetching}>
+              Read again
+            </button>
+          )}
+        </div>
       </header>
 
-      {device.infoError && <p className="banner error">Could not read the device's name and model: {device.infoError}</p>}
+      {node.error && <p className="banner error">{node.error}</p>}
       {state.state === 'error' && <p className="banner error">{state.error}</p>}
       {reload.isError && <p className="banner error">{reload.error.message}</p>}
 
-      <dl className="facts">
-        <Fact label="Address">
-          {device.network === 0 ? (
-            <span className="mono">{device.address}</span>
-          ) : (
+      {node.facts && node.facts.length > 0 && (
+        <dl className="facts">
+          {node.facts.map((f) => (
+            <Fragment key={f.label} label={f.label} value={f.value} mono={f.mono} />
+          ))}
+          {state.state !== 'none' && (
             <>
-              Network {device.network}, MAC <span className="mono">{device.mac}</span>, through{' '}
-              {router ? `${deviceLabel(router)} at ` : 'the router at '}
-              <span className="mono">{device.address}</span>
+              <dt>Under it</dt>
+              <dd>
+                {state.state === 'unknown' && 'Not read yet'}
+                {state.state === 'loading' && (state.total > 0 ? `Reading… ${state.done} of ${state.total}` : 'Reading…')}
+                {state.state === 'ready' && plural(state.total, 'item')}
+                {state.state === 'error' && 'Could not be read'}
+              </dd>
             </>
           )}
-          {device.added && (
-            <>
-              {' '}
-              <span className="sub" title="This device did not answer the Who-Is: it was added by its address and read directly.">
-                (added by address)
-              </span>
-            </>
-          )}
-        </Fact>
-        <Fact label="Vendor">
-          {device.vendorName ? `${device.vendorName} (${device.vendorId})` : `Vendor ${device.vendorId}`}
-        </Fact>
-        <Fact label="Model">{device.modelName}</Fact>
-        <Fact label="Firmware">{device.firmware}</Fact>
-        <Fact label="Application software">{device.software}</Fact>
-        <Fact label="Location">{device.location}</Fact>
-        <Fact label="Max APDU">{device.maxApdu} bytes</Fact>
-        <Fact label="Segmentation">{device.segmentation}</Fact>
-        <Fact label="Objects">
-          {state.state === 'idle' && 'Not read yet'}
-          {state.state === 'loading' &&
-            (state.total > 0 ? `Reading… ${state.done} of ${state.total}` : 'Reading the object list…')}
-          {state.state === 'ready' && state.total}
-          {state.state === 'error' && 'Could not be read'}
-        </Fact>
-      </dl>
+        </dl>
+      )}
 
       {counts.size > 0 && (
         <ul className="type-counts">
-          {[...counts].map(([typeName, n]) => (
-            <li key={typeName}>
-              <span className={`chip ${family({ typeName })}`}>{n}</span> {titleCase(typeName)}
+          {[...counts].map(([group, members]) => (
+            <li key={group}>
+              <span className={`chip ${members[0].family ?? 'other'}`}>{members.length}</span> {group || 'Items'}
             </li>
           ))}
         </ul>
       )}
-    </div>
-  )
-}
 
-const longList = 12
-
-function PropertyValue({ property: p }: { property: Property }) {
-  const [all, setAll] = useState(false)
-  if (p.error) return <span className="prop-error">{p.error}</span>
-  if (!p.items) return <span className="prop-value">{p.value}</span>
-  const items = all ? p.items : p.items.slice(0, longList)
-  return (
-    <>
-      <ol className="prop-items">
-        {items.map((item, i) => (
-          <li key={i}>{item}</li>
-        ))}
-      </ol>
-      {p.items.length > longList && (
-        <button className="link" onClick={() => setAll(!all)}>
-          {all ? 'Show fewer' : `Show all ${p.items.length}`}
-        </button>
-      )}
-    </>
-  )
-}
-
-interface ObjectDetailProps {
-  device: Device
-  type: number
-  instance: number
-  // What the tree knows of the object, if its device's objects are loaded.
-  object?: BacnetObject
-}
-
-export function ObjectDetail({ device, type, instance, object }: ObjectDetailProps) {
-  const query = useQuery({
-    queryKey: ['properties', device.id, type, instance],
-    queryFn: () => api.properties(device.id, type, instance),
-    // An object picked again is read again: the values are live.
-    staleTime: 0,
-    gcTime: 0,
-  })
-  const typeName = object?.typeName ?? `type ${type}`
-  const readAt = query.data && new Date(query.data.readAt)
-
-  return (
-    <div className="detail">
-      <header className="detail-head">
-        <div>
-          <p className="eyebrow">
-            {titleCase(typeName)} {instance} · {deviceLabel(device)}
-          </p>
-          <h2>{object?.name || `${typeName}:${instance}`}</h2>
-          {object?.description && <p className="lede">{object.description}</p>}
-        </div>
-        <div className="detail-actions">
-          {readAt && !query.isFetching && <span className="sub">Read at {readAt.toLocaleTimeString()}</span>}
-          {query.isFetching && <span className="spinner" aria-label="Reading" />}
-          <button className="button" onClick={() => query.refetch()} disabled={query.isFetching}>
-            Read again
-          </button>
-        </div>
-      </header>
-
-      {query.isError && <p className="banner error">Could not read the properties: {query.error.message}</p>}
-      {query.isPending && <p className="sub">Reading the properties…</p>}
-
-      {query.data && (
+      {detail.isError && <p className="banner error">Could not read the details: {detail.error.message}</p>}
+      {detail.isPending && node.kind !== 'group' && <p className="sub">Reading…</p>}
+      {detail.data && (
         <table className="props">
           <thead>
             <tr>
@@ -187,26 +127,55 @@ export function ObjectDetail({ device, type, instance, object }: ObjectDetailPro
             </tr>
           </thead>
           <tbody>
-            {query.data.properties.map((p) => (
-              <tr key={`${p.id}/${p.index ?? ''}`}>
-                <th scope="row">
-                  {p.name}
-                  {p.index !== undefined && ` [${p.index}]`}
-                  <span className="prop-id">{p.id}</span>
-                </th>
+            {detail.data.rows.map((r, i) => (
+              <tr key={`${r.name}/${i}`}>
+                <th scope="row">{r.name}</th>
                 <td>
-                  <PropertyValue property={p} />
+                  <RowValue row={r} />
                 </td>
               </tr>
             ))}
           </tbody>
         </table>
       )}
-      {query.data && (
+      {detail.data && (
         <p className="sub foot">
-          {query.data.properties.length} {query.data.properties.length === 1 ? 'property' : 'properties'}
+          {detail.data.rows.length} {detail.data.rows.length === 1 ? 'property' : 'properties'}
         </p>
       )}
     </div>
+  )
+}
+
+function Fragment({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
+  if (!value) return null
+  return (
+    <>
+      <dt>{label}</dt>
+      <dd className={mono ? 'mono' : undefined}>{value}</dd>
+    </>
+  )
+}
+
+const longList = 12
+
+function RowValue({ row: r }: { row: DetailRow }) {
+  const [all, setAll] = useState(false)
+  if (r.error) return <span className="prop-error">{r.error}</span>
+  if (!r.items) return <span className="prop-value">{r.value}</span>
+  const items = all ? r.items : r.items.slice(0, longList)
+  return (
+    <>
+      <ol className="prop-items">
+        {items.map((item, i) => (
+          <li key={i}>{item}</li>
+        ))}
+      </ol>
+      {r.items.length > longList && (
+        <button className="link" onClick={() => setAll(!all)}>
+          {all ? 'Show fewer' : `Show all ${r.items.length}`}
+        </button>
+      )}
+    </>
   )
 }
