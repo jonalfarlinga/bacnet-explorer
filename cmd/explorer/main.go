@@ -4,10 +4,16 @@
 //	go run ./cmd/explorer -interface "Ethernet 3"
 //	go run ./cmd/explorer -sim
 //
+// A network on another IP subnet is reached through its BBMD:
+//
+//	go run ./cmd/explorer -interface "Ethernet 3" -bbmd 10.0.124.2
+//
 // It is read-only on the BACnet network. It sends Who-Is, ReadProperty and
-// ReadPropertyMultiple requests and the Segment-ACKs that segmented replies
-// need, and nothing else: it does not write, subscribe, announce itself with
-// an I-Am, or answer what devices send to it.
+// ReadPropertyMultiple requests, the Segment-ACKs that segmented replies
+// need, Who-Is-Router-To-Network to find routers, and with -bbmd, the
+// registration that makes the BBMD forward broadcasts to it; nothing else.
+// It does not write, subscribe, announce itself with an I-Am, or answer what
+// devices send to it.
 package main
 
 import (
@@ -35,6 +41,8 @@ var (
 	flagPort      = flag.Uint("port", client.DefaultPort, "BACnet/IP UDP port")
 	flagTimeout   = flag.Duration("timeout", 3*time.Second, "how long to wait for each reply")
 	flagRetries   = flag.Int("retries", 2, "how many times to resend a request that got no reply")
+	flagBBMD      = flag.String("bbmd", "", "register as a foreign device with the BBMD at this address (IP or IP:port) to reach a BACnet network on another IP subnet")
+	flagTTL       = flag.Duration("bbmd-ttl", client.DefaultTTL, "how long each foreign-device registration lasts; it is renewed halfway through")
 	flagSim       = flag.Bool("sim", false, "browse simulated devices on this machine instead of a network")
 )
 
@@ -44,6 +52,19 @@ func main() {
 		fmt.Fprintln(os.Stderr, "explorer:", err)
 		os.Exit(1)
 	}
+}
+
+// parseAddrPort reads an IP address with an optional port, which is
+// defaultPort if left out.
+func parseAddrPort(s string, defaultPort uint16) (netip.AddrPort, error) {
+	if ap, err := netip.ParseAddrPort(s); err == nil {
+		return ap, nil
+	}
+	addr, err := netip.ParseAddr(s)
+	if err != nil {
+		return netip.AddrPort{}, fmt.Errorf("%q is not an IP address or IP:port", s)
+	}
+	return netip.AddrPortFrom(addr, defaultPort), nil
 }
 
 // inUse reports whether err is a bind to an address that is taken. The error
@@ -57,19 +78,32 @@ func run() error {
 	if *flagPort == 0 || *flagPort > 0xFFFF {
 		return fmt.Errorf("-port %d is not a UDP port", *flagPort)
 	}
+	var foreign *client.ForeignDeviceConfig
+	if *flagBBMD != "" {
+		bbmd, err := parseAddrPort(*flagBBMD, uint16(*flagPort))
+		if err != nil {
+			return fmt.Errorf("-bbmd: %w", err)
+		}
+		foreign = &client.ForeignDeviceConfig{BBMD: bbmd, TTL: *flagTTL}
+	}
 	svc := discovery.New()
 	defer svc.Close()
 
 	use := func(ifc client.Interface) error {
 		cfg := ifc.Config(uint16(*flagPort))
 		cfg.Timeout, cfg.Retries = *flagTimeout, *flagRetries
+		cfg.ForeignDevice = foreign
 		if err := svc.Use(ifc.Name, cfg, false); err != nil {
 			if inUse(err) {
 				return fmt.Errorf("UDP port %d on %s (%s) is in use: another BACnet program on this machine has it open", cfg.Local.Port(), ifc.Name, cfg.Local.Addr())
 			}
 			return fmt.Errorf("opening UDP %s on %s: %w", cfg.Local, ifc.Name, err)
 		}
-		fmt.Printf("BACnet/IP on %s (%s), broadcasting to %s\n", ifc.Name, cfg.Local, cfg.Broadcast)
+		if foreign != nil {
+			fmt.Printf("BACnet/IP on %s (%s), a foreign device of the BBMD at %s\n", ifc.Name, cfg.Local, foreign.BBMD)
+		} else {
+			fmt.Printf("BACnet/IP on %s (%s), broadcasting to %s\n", ifc.Name, cfg.Local, cfg.Broadcast)
+		}
 		return nil
 	}
 	cfg := api.Config{Service: svc, UI: web.UI()}

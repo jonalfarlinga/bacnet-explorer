@@ -24,7 +24,7 @@ func TestSendRefusesAllButReads(t *testing.T) {
 		want := service == int(services.ServiceConfirmedReadProperty) ||
 			service == int(services.ServiceConfirmedReadPropMultiple)
 		a := plumbing.NewAPDU(plumbing.ConfirmedReq, uint8(service), nil)
-		err := c.send(plumbing.BVLCFuncUnicast, to.IP, npduTo(to, true), a)
+		err := c.sendAPDU(plumbing.BVLCFuncUnicast, to.IP, npduTo(to, true), a)
 		if got := !errors.Is(err, ErrServiceNotAllowed); got != want {
 			t.Errorf("confirmed service %d: sent %t, want %t", service, got, want)
 		}
@@ -32,15 +32,56 @@ func TestSendRefusesAllButReads(t *testing.T) {
 	for service := 0; service < 256; service++ {
 		want := service == int(services.ServiceUnconfirmedWhoIs)
 		a := plumbing.NewAPDU(plumbing.UnConfirmedReq, uint8(service), nil)
-		err := c.send(plumbing.BVLCFuncUnicast, to.IP, npduTo(to, false), a)
+		err := c.sendAPDU(plumbing.BVLCFuncUnicast, to.IP, npduTo(to, false), a)
 		if got := !errors.Is(err, ErrServiceNotAllowed); got != want {
 			t.Errorf("unconfirmed service %d: sent %t, want %t", service, got, want)
 		}
 	}
 	for _, pduType := range []uint8{plumbing.SimpleAck, plumbing.ComplexAck, plumbing.Error, plumbing.Reject, plumbing.Abort} {
-		err := c.send(plumbing.BVLCFuncUnicast, to.IP, npduTo(to, false), &plumbing.APDU{Type: pduType})
+		err := c.sendAPDU(plumbing.BVLCFuncUnicast, to.IP, npduTo(to, false), &plumbing.APDU{Type: pduType})
 		if !errors.Is(err, ErrServiceNotAllowed) {
 			t.Errorf("PDU type %d was sent: the client answers nothing", pduType)
+		}
+	}
+
+	// A read may go out as a unicast, a broadcast or a distribute-broadcast,
+	// and in no other envelope: the client is not a BBMD.
+	read := plumbing.NewAPDU(plumbing.ConfirmedReq, services.ServiceConfirmedReadProperty, nil)
+	for function := 0; function < 256; function++ {
+		want := function == plumbing.BVLCFuncUnicast || function == plumbing.BVLCFuncBroadcast ||
+			function == plumbing.BVLCFuncDistributeBroadcastToNetwork
+		err := c.sendAPDU(uint8(function), to.IP, npduTo(to, true), read)
+		if got := !errors.Is(err, ErrServiceNotAllowed); got != want {
+			t.Errorf("BVLC function %#x: sent %t, want %t", function, got, want)
+		}
+	}
+
+	// Of the network layer messages, only Who-Is-Router-To-Network.
+	for msgType := 0; msgType < 256; msgType++ {
+		want := msgType == int(plumbing.NetMsgWhoIsRouterToNetwork)
+		m := plumbing.NewNetworkMessage(plumbing.NewBVLC(plumbing.BVLCFuncUnicast),
+			plumbing.NewNPDU(false, false, false, false), uint8(msgType), nil)
+		err := c.send(to.IP, m)
+		if got := !errors.Is(err, ErrServiceNotAllowed); got != want {
+			t.Errorf("network layer message %#x: sent %t, want %t", msgType, got, want)
+		}
+	}
+
+	// Of the BVLC functions, only the registration and the table reads.
+	for _, tc := range []struct {
+		msg  plumbing.BACnet
+		want bool
+	}{
+		{plumbing.NewRegisterForeignDevice(60), true},
+		{plumbing.NewReadForeignDeviceTable(), true},
+		{plumbing.NewReadBroadcastDistributionTable(), true},
+		{plumbing.NewBVLCResult(0), false},
+		{plumbing.NewReadForeignDeviceTableAck(nil), false},
+		{plumbing.NewReadBroadcastDistributionTableAck(nil), false},
+	} {
+		err := c.send(to.IP, tc.msg)
+		if got := !errors.Is(err, ErrServiceNotAllowed); got != tc.want {
+			t.Errorf("%T: sent %t, want %t", tc.msg, got, tc.want)
 		}
 	}
 }

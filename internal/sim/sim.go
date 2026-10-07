@@ -2,7 +2,14 @@
 // trying the explorer and testing its client without a network. The devices
 // answer Who-Is, ReadProperty and ReadPropertyMultiple, segment replies that
 // are too long for one APDU, and include a router with devices behind it, a
-// device that cannot segment and one without ReadPropertyMultiple.
+// device that cannot segment and one without ReadPropertyMultiple. The
+// router answers Who-Is-Router-To-Network and rejects requests for networks
+// it does not have. A station can be a BBMD, which registers foreign devices
+// and forwards broadcasts to and from them.
+//
+// Loopback has no broadcast address, so a frame sent as an
+// Original-Broadcast-NPDU to any station is heard by every station, as a
+// subnet broadcast would be.
 package sim
 
 import (
@@ -11,6 +18,7 @@ import (
 	"net"
 	"net/netip"
 	"sync"
+	"time"
 
 	"github.com/jonalfarlinga/bacnet"
 	"github.com/jonalfarlinga/bacnet/objects"
@@ -40,6 +48,12 @@ type Device struct {
 	// first device. Net is 0 for a device with a BACnet/IP address of its own.
 	Net uint16
 	MAC []byte
+	// BBMD makes the device's station a BBMD as well: it registers foreign
+	// devices, answers the table reads, and forwards broadcasts between its
+	// subnet (every station) and the foreign devices.
+	BBMD bool
+	// RefuseForeign makes a BBMD NAK every registration.
+	RefuseForeign bool
 
 	objs []*object
 }
@@ -70,6 +84,14 @@ type station struct {
 	mu sync.Mutex
 	// sending holds the segments of replies that are still going out.
 	sending map[txKey]*segmented
+	// fdt is the Foreign Device Table of a BBMD station: when each
+	// registration expires.
+	fdt map[netip.AddrPort]fdEntry
+}
+
+type fdEntry struct {
+	ttl     uint16
+	expires time.Time
 }
 
 type txKey struct {
@@ -101,7 +123,10 @@ func StartDevices(stations [][]*Device) (*Network, error) {
 			n.Close()
 			return nil, err
 		}
-		n.stations = append(n.stations, &station{conn: conn, devices: devices, sending: map[txKey]*segmented{}})
+		n.stations = append(n.stations, &station{
+			conn: conn, devices: devices,
+			sending: map[txKey]*segmented{}, fdt: map[netip.AddrPort]fdEntry{},
+		})
 	}
 	for _, st := range n.stations {
 		n.wg.Add(1)
@@ -113,8 +138,9 @@ func StartDevices(stations [][]*Device) (*Network, error) {
 	return n, nil
 }
 
-// Addr is where a Who-Is reaches every device: the simulated network has no
-// broadcast address, so the first station passes a Who-Is on to the others.
+// Addr is the address of the first station. A broadcast sent to it reaches
+// every station, and when the first station is a BBMD, a foreign device
+// registers there.
 func (n *Network) Addr() netip.AddrPort {
 	return n.stations[0].addr()
 }
@@ -128,8 +154,11 @@ func (n *Network) Close() {
 }
 
 func (st *station) addr() netip.AddrPort {
-	return st.conn.LocalAddr().(*net.UDPAddr).AddrPort()
+	ap := st.conn.LocalAddr().(*net.UDPAddr).AddrPort()
+	return netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port())
 }
+
+func (st *station) bbmd() bool { return st.devices[0].BBMD }
 
 func (n *Network) serve(st *station) {
 	buf := make([]byte, 2048)
@@ -138,22 +167,55 @@ func (n *Network) serve(st *station) {
 		if err != nil {
 			return
 		}
-		msg, err := bacnet.Parse(buf[:size])
-		if err != nil {
+		src = netip.AddrPortFrom(src.Addr().Unmap(), src.Port())
+		raw := append([]byte(nil), buf[:size]...)
+		var hdr plumbing.BVLC
+		if hdr.UnmarshalBinary(raw) != nil {
 			continue
 		}
-		switch m := msg.(type) {
-		case *services.UnconfirmedWhoIs:
+		switch hdr.Function {
+		case plumbing.BVLCFuncBroadcast:
+			// Stands in for the subnet broadcast: every station hears it.
 			for _, other := range n.stations {
-				other.iAm(src, m.NPDU)
+				other.handle(src, raw)
 			}
-		case *services.ConfirmedReadProperty:
-			if dev := st.target(m.NPDU); dev != nil {
-				st.read(src, dev, m.APDU)
-			}
-		case *services.SegmentACK:
-			st.continueReply(src, m.APDU)
+		case plumbing.BVLCFuncDistributeBroadcastToNetwork:
+			st.distribute(n, src, raw)
+		default:
+			st.handle(src, raw)
 		}
+	}
+}
+
+// handle answers one frame addressed to the station.
+func (st *station) handle(src netip.AddrPort, raw []byte) {
+	msg, err := bacnet.Parse(raw)
+	if err != nil {
+		return
+	}
+	switch m := msg.(type) {
+	case *services.UnconfirmedWhoIs:
+		st.iAm(src, m.NPDU)
+	case *services.UnconfirmedIAm:
+		// A broadcast on the subnet: a BBMD passes it to its foreign
+		// devices.
+		st.forwardToForeign(src, raw)
+	case *services.ConfirmedReadProperty:
+		if dev := st.target(m.NPDU); dev != nil {
+			st.read(src, dev, m.APDU)
+		} else if m.NPDU.Control&0x20 != 0 && len(st.nets()) > 0 {
+			st.rejectNetwork(src, m.NPDU.DNET)
+		}
+	case *services.SegmentACK:
+		st.continueReply(src, m.APDU)
+	case *plumbing.NetworkMessage:
+		st.networkMessage(src, m)
+	case *plumbing.RegisterForeignDevice:
+		st.register(src, m.TTL)
+	case *plumbing.ReadForeignDeviceTable:
+		st.readFDT(src)
+	case *plumbing.ReadBroadcastDistributionTable:
+		st.readBDT(src)
 	}
 }
 
@@ -168,6 +230,190 @@ func (st *station) target(npdu *plumbing.NPDU) *Device {
 		}
 	}
 	return nil
+}
+
+// nets lists the networks the station routes to.
+func (st *station) nets() []uint16 {
+	var nets []uint16
+	for _, d := range st.devices {
+		if d.Net != 0 && !containsNet(nets, d.Net) {
+			nets = append(nets, d.Net)
+		}
+	}
+	return nets
+}
+
+func containsNet(nets []uint16, net uint16) bool {
+	for _, n := range nets {
+		if n == net {
+			return true
+		}
+	}
+	return false
+}
+
+// ---- routing ---------------------------------------------------------------
+
+// networkMessage answers a Who-Is-Router-To-Network when the station is a
+// router for the network asked about, or for any network when none is.
+func (st *station) networkMessage(src netip.AddrPort, m *plumbing.NetworkMessage) {
+	if m.Type != plumbing.NetMsgWhoIsRouterToNetwork {
+		return
+	}
+	nets := st.nets()
+	if len(nets) == 0 {
+		return
+	}
+	asked, err := m.Networks()
+	if err != nil {
+		return
+	}
+	if len(asked) == 1 && !containsNet(nets, asked[0]) {
+		return
+	}
+	st.sendNetworkMessage(src, plumbing.NetMsgIAmRouterToNetwork, plumbing.NetworksData(nets...))
+}
+
+// rejectNetwork tells the sender the station routes to no such network.
+func (st *station) rejectNetwork(src netip.AddrPort, dnet uint16) {
+	data := []byte{1, 0, 0} // not directly connected and no route known
+	binary.BigEndian.PutUint16(data[1:], dnet)
+	st.sendNetworkMessage(src, plumbing.NetMsgRejectMessageToNetwork, data)
+}
+
+func (st *station) sendNetworkMessage(to netip.AddrPort, msgType uint8, data []byte) {
+	m := plumbing.NewNetworkMessage(
+		plumbing.NewBVLC(plumbing.BVLCFuncUnicast),
+		plumbing.NewNPDU(false, false, false, false),
+		msgType, data,
+	)
+	if b, err := m.MarshalBinary(); err == nil {
+		st.conn.WriteToUDPAddrPort(b, to)
+	}
+}
+
+// ---- BBMD ------------------------------------------------------------------
+
+// register answers a Register-Foreign-Device.
+func (st *station) register(src netip.AddrPort, ttl uint16) {
+	if !st.bbmd() {
+		return
+	}
+	if st.devices[0].RefuseForeign {
+		st.result(src, plumbing.BVLCResultRegisterForeignDeviceNAK)
+		return
+	}
+	st.mu.Lock()
+	st.fdt[src] = fdEntry{ttl: ttl, expires: time.Now().Add(time.Duration(ttl)*time.Second + 30*time.Second)}
+	st.mu.Unlock()
+	st.result(src, plumbing.BVLCResultSuccess)
+}
+
+// foreign lists the registrations that have not expired.
+func (st *station) foreign() map[netip.AddrPort]fdEntry {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	now := time.Now()
+	for addr, e := range st.fdt {
+		if !e.expires.After(now) {
+			delete(st.fdt, addr)
+		}
+	}
+	live := make(map[netip.AddrPort]fdEntry, len(st.fdt))
+	for addr, e := range st.fdt {
+		live[addr] = e
+	}
+	return live
+}
+
+func (st *station) readFDT(src netip.AddrPort) {
+	if !st.bbmd() {
+		return
+	}
+	var entries []plumbing.FDTEntry
+	now := time.Now()
+	for addr, e := range st.foreign() {
+		entries = append(entries, plumbing.FDTEntry{
+			IP: addr.Addr().As4(), Port: addr.Port(), TTL: e.ttl,
+			RemainingTime: uint16(max(0, e.expires.Sub(now)/time.Second)),
+		})
+	}
+	st.sendBVLC(src, plumbing.NewReadForeignDeviceTableAck(entries))
+}
+
+func (st *station) readBDT(src netip.AddrPort) {
+	if !st.bbmd() {
+		return
+	}
+	self := st.addr()
+	st.sendBVLC(src, plumbing.NewReadBroadcastDistributionTableAck([]plumbing.BDTEntry{
+		{IP: self.Addr().As4(), Port: self.Port(), Mask: [4]byte{255, 255, 255, 255}},
+	}))
+}
+
+func (st *station) result(to netip.AddrPort, code uint16) {
+	st.sendBVLC(to, plumbing.NewBVLCResult(code))
+}
+
+func (st *station) sendBVLC(to netip.AddrPort, msg plumbing.BACnet) {
+	if b, err := msg.MarshalBinary(); err == nil {
+		st.conn.WriteToUDPAddrPort(b, to)
+	}
+}
+
+// distribute broadcasts, on behalf of a registered foreign device, the NPDU
+// of a Distribute-Broadcast-To-Network: to every station of the subnet and
+// to the other foreign devices, as a Forwarded-NPDU from the sender.
+func (st *station) distribute(n *Network, src netip.AddrPort, raw []byte) {
+	if !st.bbmd() {
+		return
+	}
+	foreign := st.foreign()
+	if _, ok := foreign[src]; !ok {
+		st.result(src, plumbing.BVLCResultDistributeBroadcastToNetworkNAK)
+		return
+	}
+	fwd := forwarded(raw, src)
+	for _, other := range n.stations {
+		st.conn.WriteToUDPAddrPort(fwd, other.addr())
+	}
+	for addr := range foreign {
+		if addr != src {
+			st.conn.WriteToUDPAddrPort(fwd, addr)
+		}
+	}
+}
+
+// forwardToForeign passes a broadcast heard on the subnet to every foreign
+// device, as a Forwarded-NPDU from its sender.
+func (st *station) forwardToForeign(src netip.AddrPort, raw []byte) {
+	if !st.bbmd() {
+		return
+	}
+	fwd := forwarded(raw, src)
+	for addr := range st.foreign() {
+		if addr != src {
+			st.conn.WriteToUDPAddrPort(fwd, addr)
+		}
+	}
+}
+
+// forwarded re-envelopes a frame as a Forwarded-NPDU from origin.
+func forwarded(raw []byte, origin netip.AddrPort) []byte {
+	var hdr plumbing.BVLC
+	if hdr.UnmarshalBinary(raw) != nil {
+		return nil
+	}
+	body := raw[hdr.MarshalLen():]
+	f := plumbing.NewBVLC(plumbing.BVLCFuncForwardedNPDU)
+	ip := origin.Addr().As4()
+	copy(f.Origin[:4], ip[:])
+	binary.BigEndian.PutUint16(f.Origin[4:], origin.Port())
+	f.Length = uint16(f.MarshalLen() + len(body))
+	out := make([]byte, f.MarshalLen()+len(body))
+	f.MarshalTo(out)
+	copy(out[f.MarshalLen():], body)
+	return out
 }
 
 // iAm answers a Who-Is for each device of the station it reaches.

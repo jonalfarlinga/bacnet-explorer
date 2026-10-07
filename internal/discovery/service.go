@@ -21,6 +21,9 @@ type Transport struct {
 	Name      string `json:"name"`
 	Local     string `json:"local"`
 	Broadcast string `json:"broadcast"`
+	// BBMD is the BBMD the client is registered with as a foreign device,
+	// when it reaches the network through one.
+	BBMD      string `json:"bbmd,omitempty"`
 	Simulated bool   `json:"simulated"`
 }
 
@@ -160,6 +163,10 @@ func (s *Service) Use(name string, cfg client.Config, simulated bool) error {
 		Local:     c.Local().String(),
 		Broadcast: cfg.Broadcast.String(),
 		Simulated: simulated,
+	}
+	if cfg.ForeignDevice != nil {
+		s.transport.BBMD = cfg.ForeignDevice.BBMD.String()
+		s.transport.Broadcast = "via " + s.transport.BBMD
 	}
 	s.publish(Event{Type: "reset"})
 	s.mu.Unlock()

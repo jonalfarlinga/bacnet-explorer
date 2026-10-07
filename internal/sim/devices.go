@@ -295,3 +295,26 @@ func legacyPanel() *Device {
 	d.binary(typeBO, 0, "B1.ENA", "Boiler enable", true, "Disabled", "Enabled", false)
 	return d.finish()
 }
+
+// bbmd is the BBMD of a remote subnet, a small controller of its own.
+func bbmd(refuseForeign bool) *Device {
+	d := &Device{
+		Instance: 5000, Name: "BBMD-1", Model: "SIM-BBMD", Description: "Site BBMD and outdoor air monitor",
+		MaxAPDU: 1476, Segmentation: SegBoth, BBMD: true, RefuseForeign: refuseForeign,
+	}
+	d.analog(typeAI, 0, "OA.T", "Outdoor air temperature", objects.UnitDegreeFahrenheit, wave(61, 4, 1))
+	d.analog(typeAI, 1, "OA.RH", "Outdoor air humidity", objects.UnitPercentRelativeHumidity, wave(48, 8, 2))
+	return d.finish()
+}
+
+// RemoteSite is a subnet reached through a BBMD, for a client that
+// registers with it as a foreign device: the BBMD is the first station, and
+// with it an air handler and the plant router with its terminal units. With
+// refuseForeign, the BBMD NAKs every registration.
+func RemoteSite(refuseForeign bool) [][]*Device {
+	return [][]*Device{
+		{bbmd(refuseForeign)},
+		{airHandler()},
+		{plantRouter(), terminalUnit(2101, 5, "VAV-2-01"), terminalUnit(2102, 6, "VAV-2-02")},
+	}
+}
