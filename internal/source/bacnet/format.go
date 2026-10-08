@@ -14,21 +14,7 @@ import (
 // Property identifiers the objects package has no constant for.
 const propPropertyList = 371
 
-var objectTypeNames = map[uint16]string{
-	0: "analog-input", 1: "analog-output", 2: "analog-value", 3: "binary-input", 4: "binary-output",
-	5: "binary-value", 6: "calendar", 7: "command", 8: "device", 9: "event-enrollment", 10: "file",
-	11: "group", 12: "loop", 13: "multi-state-input", 14: "multi-state-output", 15: "notification-class",
-	16: "program", 17: "schedule", 18: "averaging", 19: "multi-state-value", 20: "trend-log",
-	21: "life-safety-point", 22: "life-safety-zone", 23: "accumulator", 24: "pulse-converter",
-	25: "event-log", 26: "global-group", 27: "trend-log-multiple", 28: "load-control", 29: "structured-view",
-	30: "access-door", 31: "timer", 32: "access-credential", 33: "access-point", 34: "access-rights",
-	35: "access-user", 36: "access-zone", 37: "credential-data-input", 38: "network-security",
-	39: "bitstring-value", 40: "characterstring-value", 41: "date-pattern-value", 42: "date-value",
-	43: "datetime-pattern-value", 44: "datetime-value", 45: "integer-value", 46: "large-analog-value",
-	47: "octetstring-value", 48: "positive-integer-value", 49: "time-pattern-value", 50: "time-value",
-	51: "notification-forwarder", 52: "alert-enrollment", 53: "channel", 54: "lighting-output",
-	55: "binary-lighting-output", 56: "network-port", 57: "elevator-group", 58: "escalator", 59: "lift",
-}
+var objectTypeNames = objects.ObjectTypeMap
 
 func objectTypeName(t uint16) string {
 	if name, ok := objectTypeNames[t]; ok {

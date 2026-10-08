@@ -171,9 +171,6 @@ type objectReader struct {
 	c   *client.Client
 	ctx context.Context
 	dev client.Device
-	// noRPM is set once the device has turned down a ReadPropertyMultiple for
-	// a single object: the rest are read one property at a time.
-	noRPM bool
 }
 
 func objectProps(t uint16) []uint16 {
@@ -187,78 +184,39 @@ func objectProps(t uint16) []uint16 {
 	return props
 }
 
-// read reads a batch of objects and publishes them. It returns an error only
-// when the device has stopped answering.
+// read reads a batch of objects and publishes them. The client sizes the
+// requests to the device and falls back to one property at a time where it
+// has to, so an error here means the device has stopped answering.
 func (r *objectReader) read(ids []client.ObjectID) error {
 	if r.ctx.Err() != nil {
 		return r.ctx.Err()
 	}
-	if r.noRPM {
-		for _, id := range ids {
-			if err := r.readSingly(id); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-
 	specs := make([]client.ReadSpec, len(ids))
 	for i, id := range ids {
 		specs[i] = client.ReadSpec{Object: id, Props: objectProps(id.Type)}
 	}
-	results, err := r.c.ReadPropertyMultiple(r.ctx, r.dev.Addr, specs)
-	switch {
-	case err == nil:
-		loaded := make([]object, 0, len(results))
-		for _, res := range results {
-			o := object{id: res.Object, loaded: true}
-			for _, p := range res.Props {
-				applyProperty(&o, p.ID, p.Values, p.Err)
-			}
-			loaded = append(loaded, o)
-		}
-		r.publish(loaded)
-		return nil
-	case gone(err):
+	results, err := r.c.ReadMany(r.ctx, r.dev, specs)
+	if err != nil {
 		return err
-	case len(ids) > 1:
-		// The device declined, or sent something unreadable; most often the
-		// reply would not fit. Ask for less at a time.
-		half := len(ids) / 2
-		if err := r.read(ids[:half]); err != nil {
-			return err
+	}
+	loaded := make([]object, 0, len(results))
+	for _, res := range results {
+		o := object{id: res.Object, loaded: true}
+		for _, p := range res.Props {
+			applyProperty(&o, p.ID, p.Values, p.Err)
 		}
-		return r.read(ids[half:])
+		loaded = append(loaded, o)
 	}
-	if client.Declined(err) {
-		r.noRPM = true
-	}
-	return r.readSingly(ids[0])
+	r.publish(loaded)
+	return nil
 }
 
 // gone reports whether err means the device is not answering, or that nobody
 // is waiting for the answer any more. Any other error is the device's answer
 // to one request, and the next request is worth making.
 func gone(err error) bool {
-	return errors.Is(err, client.ErrTimeout) || errors.Is(err, client.ErrClosed) ||
+	return errors.Is(err, client.ErrTimeout) || errors.Is(err, client.ErrClosed) || errors.Is(err, client.ErrSourceDenied) ||
 		errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
-}
-
-// readSingly reads an object with one ReadProperty for each property.
-func (r *objectReader) readSingly(id client.ObjectID) error {
-	o := object{id: id, loaded: true}
-	for _, prop := range objectProps(id.Type) {
-		if prop == objects.PropertyIdDescription {
-			continue // not worth a request of its own
-		}
-		values, err := r.c.ReadProperty(r.ctx, r.dev.Addr, id, prop)
-		if gone(err) {
-			return err
-		}
-		applyProperty(&o, uint32(prop), values, err)
-	}
-	r.publish([]object{o})
-	return nil
 }
 
 // applyProperty sets the field of o that a property read fills.

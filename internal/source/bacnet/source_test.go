@@ -25,7 +25,9 @@ func start(t *testing.T) (*explorer.Registry, <-chan explorer.Event) {
 
 	reg := explorer.New()
 	t.Cleanup(reg.CloseAll)
-	reg.Register(New(Options{Timeout: time.Second, Sim: network}))
+	// The simulated devices answer at once; the client's rate cap would
+	// only slow the test down.
+	reg.Register(New(Options{Timeout: time.Second, Sim: network, MaxRequestsPerSec: -1}))
 	events, cancel := reg.Subscribe()
 	t.Cleanup(cancel)
 	if err := reg.Open(context.Background(), Kind, nil); err != nil {

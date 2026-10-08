@@ -32,6 +32,10 @@ type Options struct {
 	Retries  int
 	Logger   *slog.Logger
 	OnPacket func(client.PacketEvent)
+	// MaxRequestsPerSec caps what the client sends, to all devices
+	// together, as a safety net under the explorer's own pacing. 0 is the
+	// client's default; below 0 is no cap.
+	MaxRequestsPerSec float64
 	// Sim, when set, is browsed instead of a network. The source then has
 	// no settings.
 	Sim *sim.Network
@@ -172,6 +176,7 @@ func (s *Source) Open(ctx context.Context, settings explorer.Values) error {
 	}
 	cfg.Timeout, cfg.Retries = s.opts.Timeout, s.opts.Retries
 	cfg.Logger, cfg.OnPacket = s.opts.Logger, s.opts.OnPacket
+	cfg.MaxRequestsPerSec = s.opts.MaxRequestsPerSec
 	return s.use(name, cfg)
 }
 

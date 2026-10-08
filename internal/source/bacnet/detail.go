@@ -198,45 +198,17 @@ func (s *Source) readBatch(ctx context.Context, c *client.Client, dev client.Dev
 	for i, w := range wants {
 		specs[i] = client.ReadSpec{Object: w.obj, Props: valueProps(w.obj.Type)}
 	}
-	results, err := c.ReadPropertyMultiple(ctx, dev.Addr, specs)
-	if err == nil {
-		byObj := map[client.ObjectID]client.ObjectResult{}
-		for _, r := range results {
-			byObj[r.Object] = r
-		}
-		for _, w := range wants {
-			o := object{id: w.obj}
-			if r, ok := byObj[w.obj]; ok {
-				for _, p := range r.Props {
-					applyValue(&o, p.ID, p.Values, p.Err)
-				}
-			} else {
-				o.err = "not in the reply"
-			}
-			set(w.index, toReading(o))
-		}
-		return nil
-	}
-	if gone(err) {
+	results, err := c.ReadMany(ctx, dev, specs)
+	if err != nil {
 		return err
 	}
-	if len(wants) > 1 {
-		half := len(wants) / 2
-		if err := s.readBatch(ctx, c, dev, wants[:half], set); err != nil {
-			return err
+	for i, w := range wants {
+		o := object{id: w.obj}
+		for _, p := range results[i].Props {
+			applyValue(&o, p.ID, p.Values, p.Err)
 		}
-		return s.readBatch(ctx, c, dev, wants[half:], set)
+		set(w.index, toReading(o))
 	}
-	w := wants[0]
-	o := object{id: w.obj}
-	for _, prop := range valueProps(w.obj.Type) {
-		values, err := c.ReadProperty(ctx, dev.Addr, w.obj, prop)
-		if gone(err) {
-			return err
-		}
-		applyValue(&o, uint32(prop), values, err)
-	}
-	set(w.index, toReading(o))
 	return nil
 }
 
