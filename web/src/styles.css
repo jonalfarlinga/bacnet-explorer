@@ -28,6 +28,8 @@
   --alarm-bg: #fdebe5;
   --fault: #a85b00;
   --fault-bg: #fdf1dc;
+  --unreached: #b34b00;
+  --unreached-bg: #ffe9d6;
 
   --sans: 'Segoe UI Variable Text', 'Segoe UI', system-ui, -apple-system, sans-serif;
   --mono: 'Cascadia Mono', 'Cascadia Code', Consolas, ui-monospace, 'SF Mono', Menlo, monospace;
@@ -60,6 +62,8 @@
     --alarm-bg: #45190f;
     --fault: #f3b95a;
     --fault-bg: #3d2a08;
+    --unreached: #ff9a4d;
+    --unreached-bg: #46240a;
   }
 }
 
@@ -493,8 +497,8 @@ ol {
 }
 
 .flag.unreached {
-  color: var(--muted);
-  background: var(--hover);
+  color: var(--unreached);
+  background: var(--unreached-bg);
   font-style: italic;
 }
 

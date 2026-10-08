@@ -36,6 +36,9 @@ type Options struct {
 	// together, as a safety net under the explorer's own pacing. 0 is the
 	// client's default; below 0 is no cap.
 	MaxRequestsPerSec float64
+	// SweepPerSec is how many addresses the daily sweep tries in a second.
+	// 0 is DefaultSweepPerSec.
+	SweepPerSec float64
 	// Sim, when set, is browsed instead of a network. The source then has
 	// no settings.
 	Sim *sim.Network
@@ -63,6 +66,9 @@ type Source struct {
 
 	// infoSlots bounds how many devices are being identified at once.
 	infoSlots chan struct{}
+
+	// sweep is the daily sweep, nil when no ranges were given for it.
+	sweep *sweeper
 }
 
 // New builds the source.
@@ -130,6 +136,8 @@ func (s *Source) Describe() explorer.Description {
 		{Key: "port", Label: "UDP port", Type: "number", Default: strconv.Itoa(client.DefaultPort)},
 		{Key: "bbmd", Label: "BBMD", Hint: "register as a foreign device with the BBMD at this IP, to reach a network on another subnet", Type: "text"},
 		{Key: "bbmd_ttl", Label: "Registration TTL", Hint: "renewed halfway through", Type: "text", Default: "5m"},
+		{Key: "sweep", Label: "Daily sweep", Hint: "addresses to try once a day, by their last two bytes, as 0.1-255.254; the first two are the adapter's; none if left out", Type: "text"},
+		{Key: "sweep_at", Label: "Sweep at", Hint: "time of day, or now: on opening, then daily", Type: "text", Default: "02:00"},
 	}
 	return d
 }
@@ -139,6 +147,7 @@ func (s *Source) Open(ctx context.Context, settings explorer.Values) error {
 	var (
 		name string
 		cfg  client.Config
+		plan *sweepPlan
 	)
 	if s.opts.Sim != nil {
 		name = "Simulated devices"
@@ -173,11 +182,20 @@ func (s *Source) Open(ctx context.Context, settings explorer.Values) error {
 			}
 			cfg.ForeignDevice = fd
 		}
+		if plan, err = newSweepPlan(ifc, uint16(port), settings["sweep"], settings["sweep_at"]); err != nil {
+			return err
+		}
 	}
 	cfg.Timeout, cfg.Retries = s.opts.Timeout, s.opts.Retries
 	cfg.Logger, cfg.OnPacket = s.opts.Logger, s.opts.OnPacket
 	cfg.MaxRequestsPerSec = s.opts.MaxRequestsPerSec
-	return s.use(name, cfg)
+	if err := s.use(name, cfg); err != nil {
+		return err
+	}
+	if plan != nil {
+		s.startSweep(plan)
+	}
+	return nil
 }
 
 // use opens a client with cfg in place of the current one, forgets every
@@ -206,7 +224,7 @@ func (s *Source) Close() error {
 	if s.stop != nil {
 		s.stop()
 	}
-	s.c, s.ctx, s.stop = nil, nil, nil
+	s.c, s.ctx, s.stop, s.sweep = nil, nil, nil, nil
 	s.devices = map[uint32]*device{}
 	s.routers = map[netip.AddrPort]bool{}
 	s.networks = map[uint16]netip.AddrPort{}
@@ -253,6 +271,9 @@ func (s *Source) Status() explorer.Status {
 	}
 	if routes := s.c.Routes(); len(routes) > 0 {
 		st.Lines = append(st.Lines, explorer.Fact{Label: "Routes", Value: fmt.Sprintf("%d networks", len(routes))})
+	}
+	if s.sweep != nil {
+		st.Lines = append(st.Lines, s.sweep.lines(s.deviceAt)...)
 	}
 	return st
 }

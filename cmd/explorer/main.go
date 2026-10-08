@@ -11,10 +11,17 @@
 //	go run ./cmd/explorer -interface "Ethernet 3" -bbmd 10.0.124.2
 //	go run ./cmd/explorer -interface "Ethernet 3" -add 10.22.60.3,10.22.60.4
 //
+// Devices that neither answer a Who-Is nor are listed are found by a sweep,
+// once a day, of the addresses given by their last two bytes; the first two
+// are the adapter's:
+//
+//	go run ./cmd/explorer -interface "Ethernet 3" -sweep 0.1-255.254
+//
 // It is read-only on the BACnet network. It sends Who-Is, ReadProperty and
 // ReadPropertyMultiple requests, the Segment-ACKs that segmented replies
-// need, Who-Is-Router-To-Network to find routers, and with -bbmd, the
-// registration that makes the BBMD forward broadcasts to it; nothing else.
+// need, Who-Is-Router-To-Network to find routers, with -bbmd, the
+// registration that makes the BBMD forward broadcasts to it, and with -sweep,
+// one ReadProperty to each address swept; nothing else.
 // It does not write, subscribe, announce itself with an I-Am, or answer what
 // devices send to it.
 package main
@@ -51,6 +58,9 @@ var (
 	flagBBMD      = flag.String("bbmd", "", "register as a foreign device with the BBMD at this address (IP or IP:port) to reach a BACnet network on another IP subnet")
 	flagTTL       = flag.Duration("bbmd-ttl", client.DefaultTTL, "how long each foreign-device registration lasts; it is renewed halfway through")
 	flagAdd       = flag.String("add", "", "comma-separated IP addresses (IP or IP:port) of devices to list by reading them, for those that no Who-Is reaches, such as devices on other IP subnets")
+	flagSweep     = flag.String("sweep", "", "addresses to try once a day with one read each, for devices that neither answer a Who-Is nor are listed: ranges over the last two bytes, as 0.1-255.254 or 4.1-4.254,9.1-11.254; the first two bytes are the adapter's; no sweep if left out")
+	flagSweepAt   = flag.String("sweep-at", "02:00", "time of day the sweep starts, or \"now\": when the explorer opens the network, then a day after each start")
+	flagSweepRate = flag.Float64("sweep-rate", bacnet.DefaultSweepPerSec, "addresses the sweep tries in a second")
 	flagSim       = flag.Bool("sim", false, "browse simulated devices on this machine instead of a network")
 	flagWalk      = flag.Float64("walk", 60, "the background walk's budget in points a minute: it reads every device's points in turn, this slowly, standing aside while anyone else reads; 0 turns it off")
 	flagWalkAgain = flag.Duration("walk-again", 24*time.Hour, "how old a device's last walk must be before the walk reads it again")
@@ -78,7 +88,10 @@ func run() error {
 	if *flagPort == 0 || *flagPort > 0xFFFF {
 		return fmt.Errorf("-port %d is not a UDP port", *flagPort)
 	}
-	opts := bacnet.Options{Timeout: *flagTimeout, Retries: *flagRetries}
+	if *flagSweepRate <= 0 {
+		return fmt.Errorf("-sweep-rate %v is not a rate", *flagSweepRate)
+	}
+	opts := bacnet.Options{Timeout: *flagTimeout, Retries: *flagRetries, SweepPerSec: *flagSweepRate}
 	if *flagLog != "" {
 		var level slog.Level
 		if err := level.UnmarshalText([]byte(*flagLog)); err != nil {
@@ -172,6 +185,8 @@ func run() error {
 		"port":     strconv.FormatUint(uint64(*flagPort), 10),
 		"bbmd":     *flagBBMD,
 		"bbmd_ttl": flagTTL.String(),
+		"sweep":    *flagSweep,
+		"sweep_at": *flagSweepAt,
 	}
 	switch {
 	case *flagSim:
