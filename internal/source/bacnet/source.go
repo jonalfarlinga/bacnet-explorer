@@ -199,11 +199,13 @@ func (s *Source) Open(ctx context.Context, settings explorer.Values) error {
 }
 
 // use opens a client with cfg in place of the current one, forgets every
-// device, and sends a Who-Is.
+// device, and sends a Who-Is. The client is read-only: the explorer leaves
+// nothing behind on a device, and so does not subscribe.
 func (s *Source) use(name string, cfg client.Config) error {
 	s.Close()
 
 	cfg.OnIAm = s.onIAm
+	cfg.ReadOnly = true
 	c, err := client.Open(cfg)
 	if err != nil {
 		return err

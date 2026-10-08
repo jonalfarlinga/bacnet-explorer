@@ -192,7 +192,7 @@ func TestDetail(t *testing.T) {
 	if got := value(d, "Segmentation supported"); got != "both" {
 		t.Errorf("segmentation-supported reads %q, want both", got)
 	}
-	if got := value(d, "Protocol services supported"); got != "readProperty, readPropertyMultiple, i-Am, who-Is" {
+	if got := value(d, "Protocol services supported"); got != "subscribeCOV, readProperty, readPropertyMultiple, i-Am, who-Is" {
 		t.Errorf("protocol-services-supported reads %q", got)
 	}
 	for _, r := range d.Rows {
