@@ -10,10 +10,15 @@ import (
 )
 
 // ParseAddress reads a device address as a user writes it: an IP with an
-// optional port, and for a device behind a router, its network number and
-// MAC in hex.
+// optional port, 47808 if left out, and for a device behind a router, its
+// network number and MAC in hex.
 func ParseAddress(address string, network uint16, mac string) (client.Address, error) {
-	ip, err := parseAddrPort(strings.TrimSpace(address), client.DefaultPort)
+	return parseAddress(address, network, mac, client.DefaultPort)
+}
+
+// parseAddress is ParseAddress with the port a bare IP means.
+func parseAddress(address string, network uint16, mac string, defaultPort uint16) (client.Address, error) {
+	ip, err := parseAddrPort(strings.TrimSpace(address), defaultPort)
 	if err != nil {
 		return client.Address{}, err
 	}

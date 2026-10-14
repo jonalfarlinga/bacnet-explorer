@@ -1,6 +1,9 @@
 // Package bacnet is the explorer's BACnet/IP source: it finds devices with
 // a Who-Is or by their address, reads their objects and properties through
-// the client, and renders what it reads. Its node IDs are
+// the client, and renders what it reads. The Who-Is is broadcast on an
+// adapter, or, with the loopback address in place of one, sent by unicast
+// to a BACnet program on this machine, such as the consumer side of a proxy,
+// which answers with the I-Ams of what is behind it. Its node IDs are
 // "bacnet:dev/<instance>" for a device, "bacnet:dev/<instance>/obj/<type>/
 // <instance>" for an object, "bacnet:net/<number>" for a network behind a
 // router, and "bacnet:router/<address>" for a router that has not announced
@@ -49,10 +52,12 @@ type Source struct {
 	opts   Options
 	events chan explorer.Event
 
-	mu   sync.Mutex
-	c    *client.Client
-	cfg  client.Config
-	name string // what the socket is on: an adapter, or the simulation
+	mu  sync.Mutex
+	c   *client.Client
+	cfg client.Config
+	// name is what the socket is on: an adapter, the simulation, or the
+	// address of the program on this machine it talks to.
+	name string
 	// ctx lives while the client does; the reads run under it.
 	ctx  context.Context
 	stop context.CancelFunc
@@ -131,12 +136,16 @@ func (s *Source) Describe() explorer.Description {
 			})
 		}
 	}
+	adapter.Options = append(adapter.Options, explorer.Option{
+		Value: loopback.String(), Label: fmt.Sprintf("This machine (%s)", loopback),
+		Hint: "a BACnet program on this machine, such as the consumer side of a proxy like bacnet-shifter · Who-Is goes to it on the UDP port",
+	})
 	d.Settings = []explorer.Field{
 		adapter,
-		{Key: "port", Label: "UDP port", Type: "number", Default: strconv.Itoa(client.DefaultPort)},
+		{Key: "port", Label: "UDP port", Hint: "the devices' port, or the port the program on this machine listens on", Type: "number", Default: strconv.Itoa(client.DefaultPort)},
 		{Key: "bbmd", Label: "BBMD", Hint: "register as a foreign device with the BBMD at this IP, to reach a network on another subnet", Type: "text"},
 		{Key: "bbmd_ttl", Label: "Registration TTL", Hint: "renewed halfway through", Type: "text", Default: "5m"},
-		{Key: "sweep", Label: "Daily sweep", Hint: "addresses to try once a day, by their last two bytes, as 0.1-255.254; the first two are the adapter's; none if left out", Type: "text"},
+		{Key: "sweep", Label: "Daily sweep", Hint: "addresses to try once a day, by their last two bytes, as 0.1-255.254; the first two are the adapter's; none if left out, and none through this machine", Type: "text"},
 		{Key: "sweep_at", Label: "Sweep at", Hint: "time of day, or now: on opening, then daily", Type: "text", Default: "02:00"},
 	}
 	return d
@@ -157,18 +166,36 @@ func (s *Source) Open(ctx context.Context, settings explorer.Values) error {
 		if adapter == "" {
 			return errors.New("no network adapter was chosen")
 		}
-		ifc, err := client.FindInterface(adapter)
-		if err != nil {
-			return err
-		}
 		port := uint64(client.DefaultPort)
 		if p := strings.TrimSpace(settings["port"]); p != "" {
+			var err error
 			if port, err = strconv.ParseUint(p, 10, 16); err != nil || port == 0 {
 				return fmt.Errorf("port %q is not a UDP port", p)
 			}
 		}
-		name = ifc.Name
-		cfg = ifc.Config(uint16(port))
+		if ip, err := netip.ParseAddr(adapter); err == nil && ip.Is4() && ip.IsLoopback() {
+			// A BACnet program on this machine, such as a proxy's consumer
+			// side. The socket is bound to loopback on a port of its own,
+			// since on Windows one bound to an adapter cannot send to
+			// 127.0.0.1 at all, and the Who-Is goes to the program by
+			// unicast; a proxy answers it with the I-Ams of what is behind
+			// it. There is no adapter, so no subnet to sweep.
+			if strings.TrimSpace(settings["sweep"]) != "" {
+				return errors.New("the daily sweep needs a network adapter: nothing is swept through a program on this machine")
+			}
+			cfg = client.Config{Local: netip.AddrPortFrom(ip, 0), Broadcast: netip.AddrPortFrom(ip, uint16(port))}
+			name = cfg.Broadcast.String()
+		} else {
+			ifc, err := client.FindInterface(adapter)
+			if err != nil {
+				return err
+			}
+			name = ifc.Name
+			cfg = ifc.Config(uint16(port))
+			if plan, err = newSweepPlan(ifc, uint16(port), settings["sweep"], settings["sweep_at"]); err != nil {
+				return err
+			}
+		}
 		if bbmd := strings.TrimSpace(settings["bbmd"]); bbmd != "" {
 			addr, err := parseAddrPort(bbmd, uint16(port))
 			if err != nil {
@@ -181,9 +208,6 @@ func (s *Source) Open(ctx context.Context, settings explorer.Values) error {
 				}
 			}
 			cfg.ForeignDevice = fd
-		}
-		if plan, err = newSweepPlan(ifc, uint16(port), settings["sweep"], settings["sweep_at"]); err != nil {
-			return err
 		}
 	}
 	cfg.Timeout, cfg.Retries = s.opts.Timeout, s.opts.Retries
@@ -246,23 +270,39 @@ func (s *Source) Status() explorer.Status {
 	}
 	st := explorer.Status{Open: true}
 	local := s.c.Local().String()
-	switch {
-	case s.opts.Sim != nil:
-		st.Summary = "Simulated devices"
-		st.Lines = []explorer.Fact{{Label: "Local", Value: local, Mono: true}}
-	case s.cfg.ForeignDevice != nil:
+	// foreign adds the BBMD registration to the summary and the lines.
+	foreign := func() {
 		fd, _ := s.c.ForeignDeviceStatus()
-		st.Summary = fmt.Sprintf("BACnet/IP on %s, foreign device of %s", s.name, fd.BBMD)
+		st.Summary += ", foreign device of " + fd.BBMD.String()
 		state := fd.State.String()
 		if fd.LastResult != nil {
 			state += ": " + fd.LastResult.Error()
 		}
+		st.Lines = append(st.Lines,
+			explorer.Fact{Label: "BBMD", Value: fd.BBMD.String(), Mono: true},
+			explorer.Fact{Label: "Registration", Value: state},
+		)
+	}
+	switch {
+	case s.opts.Sim != nil:
+		st.Summary = "Simulated devices"
+		st.Lines = []explorer.Fact{{Label: "Local", Value: local, Mono: true}}
+	case s.peer():
+		st.Summary = "BACnet/IP peer " + s.name
+		st.Lines = []explorer.Fact{
+			{Label: "Peer", Value: s.name, Mono: true},
+			{Label: "Local", Value: local, Mono: true},
+		}
+		if s.cfg.ForeignDevice != nil {
+			foreign()
+		}
+	case s.cfg.ForeignDevice != nil:
+		st.Summary = "BACnet/IP on " + s.name
 		st.Lines = []explorer.Fact{
 			{Label: "Adapter", Value: s.name},
 			{Label: "Local", Value: local, Mono: true},
-			{Label: "BBMD", Value: fd.BBMD.String(), Mono: true},
-			{Label: "Registration", Value: state},
 		}
+		foreign()
 	default:
 		st.Summary = fmt.Sprintf("BACnet/IP on %s", s.name)
 		st.Lines = []explorer.Fact{
@@ -277,11 +317,23 @@ func (s *Source) Status() explorer.Status {
 	switch {
 	case s.sweep != nil:
 		st.Background = s.sweep.lines(s.deviceAt)
-	case s.opts.Sim == nil:
+	case s.opts.Sim != nil:
+	case s.peer():
+		st.Background = []explorer.Fact{{Label: "Sweep", Value: "off: it needs a network adapter"}}
+	default:
 		st.Background = []explorer.Fact{{Label: "Sweep", Value: "off: no ranges are given for it"}}
 	}
 	return st
 }
+
+// loopback is the address that stands for this machine in place of an
+// adapter.
+var loopback = netip.MustParseAddr("127.0.0.1")
+
+// peer reports whether the socket is on loopback, talking by unicast to one
+// BACnet program on this machine rather than to an adapter's network. It is
+// called with s.mu held and a client open.
+func (s *Source) peer() bool { return s.cfg.Local.Addr().IsLoopback() }
 
 // Discover implements explorer.Source: it sends a Who-Is. Devices that
 // answer are added as their I-Ams arrive.
@@ -300,6 +352,12 @@ func (s *Source) Discover(ctx context.Context) error {
 func (s *Source) Add(ctx context.Context, form explorer.Values) (explorer.Node, error) {
 	s.mu.Lock()
 	c := s.c
+	// A bare IP means port 47808, or through a program on this machine,
+	// that program's port: the one the Who-Is goes to.
+	port := uint16(client.DefaultPort)
+	if c != nil && s.peer() {
+		port = s.cfg.Broadcast.Port()
+	}
 	s.mu.Unlock()
 	if c == nil {
 		return explorer.Node{}, explorer.ErrNotOpen
@@ -311,7 +369,7 @@ func (s *Source) Add(ctx context.Context, form explorer.Values) (explorer.Node, 
 			return explorer.Node{}, fmt.Errorf("network number %q is not a number", v)
 		}
 	}
-	addr, err := ParseAddress(form["address"], uint16(network), form["mac"])
+	addr, err := parseAddress(form["address"], uint16(network), form["mac"], port)
 	if err != nil {
 		return explorer.Node{}, err
 	}

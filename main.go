@@ -17,6 +17,13 @@
 //
 //	go run . -interface "Ethernet 3" -sweep 0.1-255.254
 //
+// A BACnet program on this machine, such as the consumer side of the
+// bacnet-shifter proxy, is browsed through loopback in place of an adapter:
+// the Who-Is goes to its port by unicast, and it answers with the I-Ams of
+// what is behind it.
+//
+//	go run . -interface 127.0.0.1 -port 47809
+//
 // It is read-only on the BACnet network. It sends Who-Is, ReadProperty and
 // ReadPropertyMultiple requests, the Segment-ACKs that segmented replies
 // need, Who-Is-Router-To-Network to find routers, with -bbmd, the
@@ -51,8 +58,8 @@ import (
 
 var (
 	flagHTTP      = flag.String("http", "127.0.0.1:8080", "address the web UI is served on")
-	flagInterface = flag.String("interface", "", "network adapter to use, by name or IPv4 address; chosen in the UI if left out and there is more than one")
-	flagPort      = flag.Uint("port", client.DefaultPort, "BACnet/IP UDP port")
+	flagInterface = flag.String("interface", "", "network adapter to use, by name or IPv4 address, or 127.0.0.1 for a BACnet program on this machine, such as a proxy's consumer side, reached through loopback; chosen in the UI if left out and there is more than one adapter")
+	flagPort      = flag.Uint("port", client.DefaultPort, "BACnet/IP UDP port: the devices', or with -interface 127.0.0.1, the one the program on this machine listens on")
 	flagTimeout   = flag.Duration("timeout", 3*time.Second, "how long to wait for each reply")
 	flagRetries   = flag.Int("retries", 2, "how many times to resend a request that got no reply")
 	flagBBMD      = flag.String("bbmd", "", "register as a foreign device with the BBMD at this address (IP or IP:port) to reach a BACnet network on another IP subnet")

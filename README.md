@@ -33,6 +33,17 @@ Then open http://127.0.0.1:8080. Without `-interface` the UI asks which adapter 
 one, and remembers the answer. The explorer needs UDP port 47808 on that adapter to hear the I-Ams, so it
 cannot share an adapter with another BACnet program such as YABE. `-h` lists the other flags.
 
+A BACnet program on this machine, such as the consumer side of the
+[bacnet-shifter](https://github.com/jonalfarlinga/bacnet-shifter) proxy, is browsed through loopback in place
+of an adapter: `-interface 127.0.0.1 -port 47809`, or **This machine** in the UI's adapter list with the
+program's port. The explorer then binds a port of its own on 127.0.0.1, which no other program can be using,
+and sends the Who-Is to 127.0.0.1:47809 by unicast; the program answers with the I-Ams of what is behind it,
+so the shifter's devices hang under its virtual network. There is no daily sweep in this mode, and a bare IP
+given to **Add by address** or `-add` means the program's port.
+
+    # Browse the bacnet-shifter running on this machine, with its consumer side on 127.0.0.1:47809.
+    $ go run . -interface 127.0.0.1 -port 47809
+
 Until the library's v0.4.0 is tagged, `go.mod` builds against a checkout of the library in the directory
 beside this one (`../bacnet`), through a `replace` directive. Once it is tagged, drop the directive and
 `go get github.com/jonalfarlinga/bacnet@v0.4.0`.

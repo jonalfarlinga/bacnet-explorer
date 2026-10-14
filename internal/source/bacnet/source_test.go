@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"net/netip"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -192,7 +194,7 @@ func TestDetail(t *testing.T) {
 	if got := value(d, "Segmentation supported"); got != "both" {
 		t.Errorf("segmentation-supported reads %q, want both", got)
 	}
-	if got := value(d, "Protocol services supported"); got != "subscribeCOV, readProperty, readPropertyMultiple, i-Am, who-Is" {
+	if got := value(d, "Protocol services supported"); got != "subscribeCOV, readProperty, readPropertyMultiple, writeProperty, i-Am, who-Is" {
 		t.Errorf("protocol-services-supported reads %q", got)
 	}
 	for _, r := range d.Rows {
@@ -298,6 +300,77 @@ func TestAddByAddress(t *testing.T) {
 	}
 	if _, err := s.Add(context.Background(), explorer.Values{"address": "nonsense"}); err == nil {
 		t.Error("adding a non-address did not fail")
+	}
+}
+
+// A BACnet program on this machine, such as a proxy's consumer side, is
+// browsed through loopback instead of an adapter: the socket is bound to
+// 127.0.0.1 on a port of its own, and the Who-Is goes to the program's port
+// by unicast. The simulated devices stand in for the program.
+func TestOpenLoopbackPeer(t *testing.T) {
+	network, err := sim.Start()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(network.Close)
+	peer := network.Addr()
+	port := strconv.Itoa(int(peer.Port()))
+
+	s := New(Options{Timeout: time.Second, MaxRequestsPerSec: -1})
+	t.Cleanup(func() { s.Close() })
+	ctx := context.Background()
+	if err := s.Open(ctx, explorer.Values{"adapter": "127.0.0.1", "port": port, "sweep_at": "02:00"}); err != nil {
+		t.Fatal(err)
+	}
+	st := s.Status()
+	if want := "BACnet/IP peer " + peer.String(); !st.Open || st.Summary != want {
+		t.Errorf("status is %+v, want %q", st, want)
+	}
+	if len(st.Background) != 1 || !strings.HasPrefix(st.Background[0].Value, "off") {
+		t.Errorf("background is %+v, want the sweep off", st.Background)
+	}
+	s.mu.Lock()
+	local := s.c.Local()
+	s.mu.Unlock()
+	if !local.Addr().IsLoopback() || local.Port() == 0 || local.Port() == peer.Port() {
+		t.Errorf("the socket is on %v, want loopback on a port of its own", local)
+	}
+	// The Who-Is, sent by unicast to the first station, reaches every device.
+	waitFor(t, "the devices to answer", func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return len(s.devices) == 7
+	})
+
+	// A bare IP added by address means the peer's port, not 47808.
+	added, err := s.Add(ctx, explorer.Values{"address": "127.0.0.1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if added.ID != devID(1001) {
+		t.Errorf("added %+v, want device 1001, the one at the peer's port", added)
+	}
+
+	// The daily sweep needs an adapter's subnet.
+	if err := s.Open(ctx, explorer.Values{"adapter": "127.0.0.1", "port": port, "sweep": "0.1-0.254"}); err == nil {
+		t.Error("a sweep through this machine was accepted")
+	}
+	// Any other IP is still looked up among the adapters.
+	if err := s.Open(ctx, explorer.Values{"adapter": "203.0.113.1", "port": port}); err == nil || !strings.Contains(err.Error(), "adapter") {
+		t.Errorf("an IP that is no adapter's gave %v", err)
+	}
+	// And the UI is offered the choice.
+	offered := false
+	for _, f := range s.Describe().Settings {
+		if f.Key != "adapter" {
+			continue
+		}
+		for _, o := range f.Options {
+			offered = offered || o.Value == "127.0.0.1"
+		}
+	}
+	if !offered {
+		t.Error("the adapter setting does not offer this machine")
 	}
 }
 
