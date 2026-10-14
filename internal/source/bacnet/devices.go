@@ -10,7 +10,7 @@ import (
 	"strings"
 
 	"github.com/jonalfarlinga/bacnet/client"
-	"github.com/jonalfarlinga/bacnet/internal/explorer"
+	"github.com/jonalfarlinga/bacnet-explorer/internal/explorer"
 	"github.com/jonalfarlinga/bacnet/objects"
 )
 

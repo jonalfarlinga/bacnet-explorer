@@ -20,7 +20,7 @@ import (
 
 	"github.com/jonalfarlinga/bacnet/client"
 	"github.com/jonalfarlinga/bacnet/client/sim"
-	"github.com/jonalfarlinga/bacnet/internal/explorer"
+	"github.com/jonalfarlinga/bacnet-explorer/internal/explorer"
 )
 
 // Kind is the source's kind, and the prefix of its node IDs.

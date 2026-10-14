@@ -1,0 +1,19 @@
+# Binaries
+*.exe
+*.exe~
+*.test
+*.out
+bin/
+
+# Local Claude Code configuration
+.claude/
+
+# Web UI: dependencies, and the build output that web/embed.go embeds. The
+# placeholder keeps the package compiling before the UI is built.
+web/node_modules/
+web/dist/*
+!web/dist/.gitkeep
+!web/public/.gitkeep
+
+# The explorer's store: what it found, and the admin's decisions.
+data/

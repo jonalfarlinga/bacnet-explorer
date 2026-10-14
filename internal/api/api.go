@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jonalfarlinga/bacnet/internal/explorer"
+	"github.com/jonalfarlinga/bacnet-explorer/internal/explorer"
 )
 
 // Config is what the API serves.

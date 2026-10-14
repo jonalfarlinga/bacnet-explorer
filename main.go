@@ -2,20 +2,20 @@
 // exposes: today the BACnet/IP devices that answer a Who-Is or are given by
 // address, and the objects and properties of the ones you open.
 //
-//	go run ./cmd/explorer -interface "Ethernet 3"
-//	go run ./cmd/explorer -sim
+//	go run . -interface "Ethernet 3"
+//	go run . -sim
 //
 // A network on another IP subnet is reached through its BBMD, or its devices
 // are listed by address:
 //
-//	go run ./cmd/explorer -interface "Ethernet 3" -bbmd 10.0.124.2
-//	go run ./cmd/explorer -interface "Ethernet 3" -add 10.22.60.3,10.22.60.4
+//	go run . -interface "Ethernet 3" -bbmd 10.0.124.2
+//	go run . -interface "Ethernet 3" -add 10.22.60.3,10.22.60.4
 //
 // Devices that neither answer a Who-Is nor are listed are found by a sweep,
 // once a day, of the addresses given by their last two bytes; the first two
 // are the adapter's:
 //
-//	go run ./cmd/explorer -interface "Ethernet 3" -sweep 0.1-255.254
+//	go run . -interface "Ethernet 3" -sweep 0.1-255.254
 //
 // It is read-only on the BACnet network. It sends Who-Is, ReadProperty and
 // ReadPropertyMultiple requests, the Segment-ACKs that segmented replies
@@ -43,10 +43,10 @@ import (
 
 	"github.com/jonalfarlinga/bacnet/client"
 	"github.com/jonalfarlinga/bacnet/client/sim"
-	"github.com/jonalfarlinga/bacnet/internal/api"
-	"github.com/jonalfarlinga/bacnet/internal/explorer"
-	"github.com/jonalfarlinga/bacnet/internal/source/bacnet"
-	"github.com/jonalfarlinga/bacnet/web"
+	"github.com/jonalfarlinga/bacnet-explorer/internal/api"
+	"github.com/jonalfarlinga/bacnet-explorer/internal/explorer"
+	"github.com/jonalfarlinga/bacnet-explorer/internal/source/bacnet"
+	"github.com/jonalfarlinga/bacnet-explorer/web"
 )
 
 var (

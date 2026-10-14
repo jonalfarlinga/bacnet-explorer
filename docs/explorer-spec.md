@@ -62,7 +62,7 @@ Package layout (proposed):
 
 ## 4. Library prerequisites (work in this repo)
 
-The app needs these library changes first. Today each example does its own socket handling and correlation inline. The detailed design is in [library-upgrade-spec.md](library-upgrade-spec.md), which supersedes this table where they differ; for example, it sets the Go minimum to 1.25.
+The app needs these library changes first. Today each example does its own socket handling and correlation inline. The detailed design is in [library-upgrade-spec.md](https://github.com/jonalfarlinga/bacnet/blob/main/docs/library-upgrade-spec.md), which supersedes this table where they differ; for example, it sets the Go minimum to 1.25.
 
 | # | Change | Why |
 |---|---|---|

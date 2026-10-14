@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/jonalfarlinga/bacnet/client"
-	"github.com/jonalfarlinga/bacnet/internal/explorer"
+	"github.com/jonalfarlinga/bacnet-explorer/internal/explorer"
 )
 
 // The sweep finds the devices that neither answer a Who-Is nor were listed

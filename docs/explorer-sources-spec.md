@@ -1,6 +1,6 @@
 # Explorer Sources — Deconstruction and Specification (v1 draft)
 
-Companion to [explorer-spec.md](explorer-spec.md) and [library-upgrade-spec.md](library-upgrade-spec.md). This spec takes the explorer apart into the BACnet communication library, a BACnet *source*, and a source-neutral explorer core, so that sources that are not BACnet can be added without the core knowing what they are.
+Companion to [explorer-spec.md](explorer-spec.md) and [library-upgrade-spec.md](https://github.com/jonalfarlinga/bacnet/blob/main/docs/library-upgrade-spec.md). This spec takes the explorer apart into the BACnet communication library, a BACnet *source*, and a source-neutral explorer core, so that sources that are not BACnet can be added without the core knowing what they are.
 
 **Status (2026-10-07):** steps 1 to 3 of the delivery plan in §5 are done. The client is public, `internal/explorer` holds the model and registry, `internal/source/bacnet` is the BACnet source, and the API and UI are source-neutral. Two things the implementation settled beyond this text: a node carries a `Listed` flag, set by the registry on nodes that came in a children list, so that a list that replaces a node's children leaves what the source announced on its own (a network behind a router) in place; and node IDs travel in the API as the `id` query parameter, since they hold slashes. Steps 4 and 5 remain.
 
