@@ -274,8 +274,11 @@ func (s *Source) Status() explorer.Status {
 	if routes := s.c.Routes(); len(routes) > 0 {
 		st.Lines = append(st.Lines, explorer.Fact{Label: "Routes", Value: fmt.Sprintf("%d networks", len(routes))})
 	}
-	if s.sweep != nil {
-		st.Lines = append(st.Lines, s.sweep.lines(s.deviceAt)...)
+	switch {
+	case s.sweep != nil:
+		st.Background = s.sweep.lines(s.deviceAt)
+	case s.opts.Sim == nil:
+		st.Background = []explorer.Fact{{Label: "Sweep", Value: "off: no ranges are given for it"}}
 	}
 	return st
 }

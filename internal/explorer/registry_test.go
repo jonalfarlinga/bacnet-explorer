@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -236,8 +238,19 @@ func TestRegistryStore(t *testing.T) {
 	if err != nil || len(registry) != 2 || len(temp) != 2 {
 		t.Fatalf("after a decision the store holds %d registry and %d temp nodes, %v; want the point with its device, and the device with the other point", len(registry), len(temp), err)
 	}
-	if info := st.Info(); info.Registries != 1 || info.Latest == "" {
+	info := st.Info()
+	if info.Registries != 1 || info.Latest == "" {
 		t.Errorf("store info %+v", info)
+	}
+	// The registry file is read-only; the temp file is still written.
+	if fi, err := os.Stat(filepath.Join(dir, info.Latest)); err != nil || fi.Mode().Perm()&0o222 != 0 {
+		t.Errorf("the registry file has mode %v, %v; want it read-only", fi.Mode(), err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, info.Latest), []byte("{}"), 0o644); err == nil {
+		t.Error("the registry file was written over")
+	}
+	if fi, err := os.Stat(filepath.Join(dir, tempFile)); err != nil || fi.Mode().Perm()&0o200 == 0 {
+		t.Errorf("the temp file has mode %v, %v; want it writable", fi.Mode(), err)
 	}
 
 	// A list that no longer has a decided point keeps it, unreached.
@@ -282,6 +295,116 @@ func TestRegistryStore(t *testing.T) {
 		t.Errorf("after contact the point is %+v", n)
 	}
 	reg2.CloseAll()
+}
+
+// Every decision leaves a registry file behind, and any of them can be put
+// back in force: its decisions hold again, what was decided since is new
+// again, what was removed since comes back, and no file is changed for it.
+func TestRegistryHistory(t *testing.T) {
+	dir := t.TempDir()
+	st, err := OpenStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+
+	reg := New()
+	if _, err := reg.Registries(); !errors.Is(err, ErrNoStore) {
+		t.Errorf("without a store the history gave %v", err)
+	}
+	if err := reg.UseStore(st); err != nil {
+		t.Fatal(err)
+	}
+	f := newFake()
+	reg.Register(f)
+	if err := reg.Open(ctx, "fake", nil); err != nil {
+		t.Fatal(err)
+	}
+	dev, _ := reg.Add(ctx, "fake", Values{"name": "d"})
+	f.children[dev.ID] = []Node{
+		{ID: "fake:d/1", Kind: KindPoint, Label: "p1", Native: []byte(`{"reg":1}`)},
+		{ID: "fake:d/2", Kind: KindPoint, Label: "p2"},
+		{ID: "fake:d/3", Kind: KindPoint, Label: "p3"},
+	}
+	reg.Children(dev.ID, false)
+	waitUntil(t, "the points", func() bool { _, ok := reg.Node("fake:d/3"); return ok })
+
+	// Four decisions: p1 tracked, p2 sidelined, p1 removed, p3 tracked.
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, err = reg.Classify([]NodeID{"fake:d/1"}, TrackTracked)
+	must(err)
+	_, err = reg.Classify([]NodeID{"fake:d/2"}, TrackSidelined)
+	must(err)
+	must(reg.Remove([]NodeID{"fake:d/1"}))
+	_, err = reg.Classify([]NodeID{"fake:d/3"}, TrackTracked)
+	must(err)
+
+	list, err := reg.Registries()
+	if err != nil || len(list) != 4 {
+		t.Fatalf("the history holds %d files, %v; want 4", len(list), err)
+	}
+	if !list[0].InForce || list[1].InForce || list[0].Devices != 1 || list[0].Tracked != 1 || list[0].Sidelined != 1 {
+		t.Errorf("the latest is %+v, want it in force with a device, a tracked and a sidelined point", list[0])
+	}
+	first := list[3]
+	if first.Tracked != 1 || first.Sidelined != 0 || first.Written.IsZero() {
+		t.Errorf("the first is %+v, want one tracked point", first)
+	}
+	for _, name := range []string{"temp.json", "../" + first.Name, "registry_none.json", ""} {
+		if _, err := reg.RegistryFile(name); !errors.Is(err, ErrUnknownRegistry) {
+			t.Errorf("reading %q gave %v", name, err)
+		}
+	}
+	file, err := reg.RegistryFile(first.Name)
+	if err != nil || len(file.Nodes) != 2 || file.InForce {
+		t.Fatalf("the first file reads as %+v, %v; want the device and p1", file, err)
+	}
+	before, err := os.ReadFile(filepath.Join(dir, first.Name))
+	must(err)
+
+	// The one in force is restored by doing nothing.
+	if name, err := reg.RestoreRegistry(list[0].Name); err != nil || name != list[0].Name {
+		t.Errorf("restoring the registry in force gave %q, %v", name, err)
+	}
+
+	// Back to the first.
+	name, err := reg.RestoreRegistry(first.Name)
+	must(err)
+	list, _ = reg.Registries()
+	if len(list) != 5 || list[0].Name != name || list[0].Tracked != 1 || list[0].Sidelined != 0 {
+		t.Fatalf("after the restore the history is %+v, want a fifth file with one tracked point", list)
+	}
+	if after, err := os.ReadFile(filepath.Join(dir, first.Name)); err != nil || string(after) != string(before) {
+		t.Errorf("the restored file was changed, %v", err)
+	}
+	if n, ok := reg.Node("fake:d/1"); !ok || n.Track != TrackTracked || n.Reached || !sameJSON(n.Native, `{"reg":1}`) {
+		t.Errorf("the removed point came back as %+v, %v; want it tracked, unreached", n, ok)
+	}
+	for _, id := range []NodeID{"fake:d/2", "fake:d/3"} {
+		if n, _ := reg.Node(id); n.Track != TrackNew || !n.Reached {
+			t.Errorf("%s is %+v, want it new again and still reached", id, n)
+		}
+	}
+	if len(f.restored) != 1 || f.restored[0].ID != "fake:d/1" {
+		t.Errorf("the source was handed %+v, want the point that came back", f.restored)
+	}
+	reg.CloseAll()
+
+	// A new run starts from what was restored.
+	reg2 := New()
+	if err := reg2.UseStore(st); err != nil {
+		t.Fatal(err)
+	}
+	for id, want := range map[NodeID]Track{"fake:d/1": TrackTracked, "fake:d/2": TrackNew, "fake:d/3": TrackNew} {
+		if n, ok := reg2.Node(id); !ok || n.Track != want {
+			t.Errorf("a new run has %s as %+v, %v; want it %s", id, n, ok, want)
+		}
+	}
 }
 
 func waitUntil(t *testing.T, what string, done func() bool) {

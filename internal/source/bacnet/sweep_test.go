@@ -163,7 +163,7 @@ func sweepOn(t *testing.T, network *sim.Network, station int) (*Source, *sweeper
 }
 
 func statusLine(s *Source, label string) string {
-	for _, l := range s.Status().Lines {
+	for _, l := range s.Status().Background {
 		if l.Label == label {
 			return l.Value
 		}
@@ -206,7 +206,10 @@ func TestSweep(t *testing.T) {
 	if got := statusLine(s, "Sweep"); got != "127.0.0.1-127.0.0.3, daily at 00:00" {
 		t.Errorf("the status names the sweep as %q", got)
 	}
-	if got := statusLine(s, "Last sweep"); !strings.Contains(got, ", 3 addresses in ") || !strings.HasSuffix(got, ": 1 device found") {
+	// The admin is told when it started and the last address it tried.
+	got := statusLine(s, "Last sweep")
+	if !strings.HasPrefix(got, "started "+w.last.started.Format("2 Jan 15:04:05")+", last address 127.0.0.3, 3 addresses in ") ||
+		!strings.HasSuffix(got, ": 1 device found") {
 		t.Errorf("the status says of the last sweep: %q", got)
 	}
 	// The client keeps nothing of the addresses where nobody was.
@@ -295,6 +298,13 @@ func TestSweepUnnamed(t *testing.T) {
 	// Once it is listed, the status no longer names its address.
 	if got := statusLine(s, "Last sweep"); strings.Contains(got, "would not say") {
 		t.Errorf("the status still says of the last sweep: %q", got)
+	}
+
+	// While a sweep runs, the status says when it started and where it is.
+	started := time.Date(2026, 10, 12, 2, 0, 0, 0, time.Local)
+	going := sweepRun{started: started, total: 65022, tried: 1203, found: 2, at: netip.MustParseAddr("10.20.4.180")}
+	if got := going.String(); got != "started 12 Oct 02:00:00, now at 10.20.4.180, 1203 of 65022 addresses tried: 2 devices found" {
+		t.Errorf("a running sweep reads %q", got)
 	}
 
 	// One that stays silent to the Who-Is is named for the admin.

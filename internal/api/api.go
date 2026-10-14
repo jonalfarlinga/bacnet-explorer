@@ -196,7 +196,45 @@ func New(cfg Config) http.Handler {
 		w.WriteHeader(http.StatusNoContent)
 	})
 
-	mux.HandleFunc("GET /api/walk", func(w http.ResponseWriter, r *http.Request) {
+	// The registry files: the one in force, and the history behind it.
+	mux.HandleFunc("GET /api/registries", func(w http.ResponseWriter, r *http.Request) {
+		list, err := reg.Registries()
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		reply(w, list)
+	})
+
+	mux.HandleFunc("GET /api/registry", func(w http.ResponseWriter, r *http.Request) {
+		file, err := reg.RegistryFile(r.URL.Query().Get("name"))
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		if file.Nodes == nil {
+			file.Nodes = []explorer.Node{}
+		}
+		reply(w, file)
+	})
+
+	// Puts a registry file of the history back in force, as a new file.
+	mux.HandleFunc("POST /api/registry/restore", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Name string `json:"name"`
+		}
+		if !readJSON(w, r, &body) {
+			return
+		}
+		name, err := reg.RestoreRegistry(body.Name)
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		reply(w, map[string]string{"name": name})
+	})
+
+	mux.HandleFunc("GET /api/walk",func(w http.ResponseWriter, r *http.Request) {
 		reply(w, reg.WalkStatus())
 	})
 
@@ -284,7 +322,8 @@ func reply(w http.ResponseWriter, v any) {
 func fail(w http.ResponseWriter, err error) {
 	code := http.StatusBadGateway
 	switch {
-	case errors.Is(err, explorer.ErrUnknownNode), errors.Is(err, explorer.ErrUnknownKind):
+	case errors.Is(err, explorer.ErrUnknownNode), errors.Is(err, explorer.ErrUnknownKind),
+		errors.Is(err, explorer.ErrNoStore), errors.Is(err, explorer.ErrUnknownRegistry):
 		code = http.StatusNotFound
 	case errors.Is(err, explorer.ErrNotOpen):
 		code = http.StatusConflict

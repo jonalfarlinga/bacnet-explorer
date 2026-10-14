@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -25,6 +26,11 @@ const (
 // Store is the directory the explorer keeps what it knows in.
 type Store struct {
 	dir string
+
+	// infos holds what has been counted in each registry file. A registry
+	// file never changes, so it is counted once.
+	mu    sync.Mutex
+	infos map[string]RegistryInfo
 }
 
 // A file of the store.
@@ -43,12 +49,29 @@ type StoreInfo struct {
 	Registries int `json:"registries"`
 }
 
+// RegistryInfo describes one registry file for the admin.
+type RegistryInfo struct {
+	Name    string    `json:"name"`
+	Written time.Time `json:"written"`
+	// InForce marks the latest file, which is the registry.
+	InForce   bool `json:"inForce"`
+	Devices   int  `json:"devices"`
+	Tracked   int  `json:"tracked"`
+	Sidelined int  `json:"sidelined"`
+}
+
+// RegistryFile is a registry file with what it holds.
+type RegistryFile struct {
+	RegistryInfo
+	Nodes []Node `json:"nodes"`
+}
+
 // OpenStore opens the directory, creating it if need be.
 func OpenStore(dir string) (*Store, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("store: %w", err)
 	}
-	return &Store{dir: dir}, nil
+	return &Store{dir: dir, infos: map[string]RegistryInfo{}}, nil
 }
 
 // Load reads the latest registry and the temp file. A missing file is an
@@ -59,14 +82,17 @@ func (s *Store) Load() (registry, temp []Node, err error) {
 		return nil, nil, err
 	}
 	if latest != "" {
-		if registry, err = s.read(latest); err != nil {
+		f, err := s.read(latest)
+		if err != nil {
 			return nil, nil, err
 		}
+		registry = f.Nodes
 	}
-	if temp, err = s.read(tempFile); err != nil {
+	f, err := s.read(tempFile)
+	if err != nil {
 		return nil, nil, err
 	}
-	return registry, temp, nil
+	return registry, f.Nodes, nil
 }
 
 // Info describes the store.
@@ -78,34 +104,118 @@ func (s *Store) Info() StoreInfo {
 // latest finds the registry file in force: the last by name, which is by
 // datetime.
 func (s *Store) latest() (name string, count int, err error) {
-	entries, err := os.ReadDir(s.dir)
-	if err != nil {
-		return "", 0, fmt.Errorf("store: %w", err)
+	names, err := s.registryNames()
+	if err != nil || len(names) == 0 {
+		return "", 0, err
 	}
-	var names []string
-	for _, e := range entries {
-		if n := e.Name(); !e.IsDir() && strings.HasPrefix(n, registryPrefix) && strings.HasSuffix(n, registrySuffix) {
-			names = append(names, n)
-		}
-	}
-	if len(names) == 0 {
-		return "", 0, nil
-	}
-	sort.Strings(names)
 	return names[len(names)-1], len(names), nil
 }
 
-func (s *Store) read(name string) ([]Node, error) {
-	b, err := os.ReadFile(filepath.Join(s.dir, name))
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
+// registryNames lists the registry files, oldest first.
+func (s *Store) registryNames() ([]string, error) {
+	entries, err := os.ReadDir(s.dir)
 	if err != nil {
 		return nil, fmt.Errorf("store: %w", err)
 	}
+	var names []string
+	for _, e := range entries {
+		if n := e.Name(); !e.IsDir() && isRegistryName(n) {
+			names = append(names, n)
+		}
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+func isRegistryName(name string) bool {
+	return strings.HasPrefix(name, registryPrefix) && strings.HasSuffix(name, registrySuffix)
+}
+
+// Registries describes every registry file, the latest first.
+func (s *Store) Registries() ([]RegistryInfo, error) {
+	names, err := s.registryNames()
+	if err != nil {
+		return nil, err
+	}
+	list := make([]RegistryInfo, 0, len(names))
+	for i := len(names) - 1; i >= 0; i-- {
+		info, err := s.registryInfo(names[i])
+		if err != nil {
+			return nil, err
+		}
+		info.InForce = i == len(names)-1
+		list = append(list, info)
+	}
+	return list, nil
+}
+
+// ReadRegistry reads one registry file, the latest or one of the history.
+func (s *Store) ReadRegistry(name string) (RegistryFile, error) {
+	// The name comes from outside: it names a registry file in the
+	// directory, and nothing else.
+	if !isRegistryName(name) || name != filepath.Base(name) {
+		return RegistryFile{}, fmt.Errorf("%w: %q", ErrUnknownRegistry, name)
+	}
+	if _, err := os.Stat(filepath.Join(s.dir, name)); err != nil {
+		return RegistryFile{}, fmt.Errorf("%w: %q", ErrUnknownRegistry, name)
+	}
+	f, err := s.read(name)
+	if err != nil {
+		return RegistryFile{}, err
+	}
+	latest, _, err := s.latest()
+	if err != nil {
+		return RegistryFile{}, err
+	}
+	info := s.count(name, f)
+	info.InForce = name == latest
+	return RegistryFile{RegistryInfo: info, Nodes: f.Nodes}, nil
+}
+
+// registryInfo counts what a registry file holds, reading it the first time.
+func (s *Store) registryInfo(name string) (RegistryInfo, error) {
+	s.mu.Lock()
+	info, ok := s.infos[name]
+	s.mu.Unlock()
+	if ok {
+		return info, nil
+	}
+	f, err := s.read(name)
+	if err != nil {
+		return RegistryInfo{}, err
+	}
+	return s.count(name, f), nil
+}
+
+func (s *Store) count(name string, f storeFile) RegistryInfo {
+	info := RegistryInfo{Name: name, Written: f.Written}
+	for _, n := range f.Nodes {
+		switch {
+		case n.Kind == KindDevice:
+			info.Devices++
+		case n.Track == TrackTracked:
+			info.Tracked++
+		case n.Track == TrackSidelined:
+			info.Sidelined++
+		}
+	}
+	s.mu.Lock()
+	s.infos[name] = info
+	s.mu.Unlock()
+	return info
+}
+
+func (s *Store) read(name string) (storeFile, error) {
 	var f storeFile
+	b, err := os.ReadFile(filepath.Join(s.dir, name))
+	if errors.Is(err, os.ErrNotExist) {
+		return f, nil
+	}
+	if err != nil {
+		return f, fmt.Errorf("store: %w", err)
+	}
 	if err := json.Unmarshal(b, &f); err != nil {
-		return nil, fmt.Errorf("store: %s: %w", name, err)
+		return f, fmt.Errorf("store: %s: %w", name, err)
 	}
 	for i := range f.Nodes {
 		n := &f.Nodes[i]
@@ -115,16 +225,17 @@ func (s *Store) read(name string) ([]Node, error) {
 			n.Children = ChildrenState{State: ChildrenUnknown, Total: n.Children.Total}
 		}
 	}
-	return f.Nodes, nil
+	return f, nil
 }
 
 // WriteTemp replaces the temp file.
 func (s *Store) WriteTemp(nodes []Node) error {
-	return s.write(tempFile, nodes)
+	return s.write(tempFile, nodes, 0o644)
 }
 
 // WriteRegistry writes a new registry file, named by the moment, and
-// returns its name.
+// returns its name. A registry file is never written again, so it is
+// read-only from the moment it appears.
 func (s *Store) WriteRegistry(nodes []Node) (string, error) {
 	// Milliseconds, and a counter after them if need be, so that a later
 	// file always sorts later: "_" sorts after ".".
@@ -136,12 +247,13 @@ func (s *Store) WriteRegistry(nodes []Node) (string, error) {
 		}
 		name = fmt.Sprintf("%s%s_%d%s", registryPrefix, stamp, i, registrySuffix)
 	}
-	return name, s.write(name, nodes)
+	return name, s.write(name, nodes, 0o444)
 }
 
 // write puts the nodes in a file, whole: it is written beside the file and
-// moved into place, so a reader never sees half of it.
-func (s *Store) write(name string, nodes []Node) error {
+// moved into place, so a reader never sees half of it. The file has its
+// permissions before it is moved, so it is never in place with others.
+func (s *Store) write(name string, nodes []Node, perm os.FileMode) error {
 	if nodes == nil {
 		nodes = []Node{}
 	}
@@ -151,7 +263,7 @@ func (s *Store) write(name string, nodes []Node) error {
 	}
 	path := filepath.Join(s.dir, name)
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+	if err := os.WriteFile(tmp, b, perm); err != nil {
 		return fmt.Errorf("store: %w", err)
 	}
 	if err := os.Rename(tmp, path); err != nil {

@@ -159,7 +159,7 @@ export function App() {
 }
 
 function SourceBadge({ source }: { source: Source }) {
-  const lines = source.status.lines ?? []
+  const lines = [...(source.status.lines ?? []), ...(source.status.background ?? [])]
   return (
     <span className="transport" title={lines.map((l) => `${l.label}: ${l.value}`).join('\n')}>
       {source.status.summary ?? source.title}

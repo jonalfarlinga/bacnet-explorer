@@ -553,6 +553,11 @@ ol {
   border-bottom-color: var(--accent);
 }
 
+.admin-bar .filter {
+  margin: 0;
+  width: 190px;
+}
+
 .admin-list {
   flex: 1;
   min-height: 0;
@@ -581,6 +586,28 @@ ol {
 
 .admin-list td.num {
   text-align: right;
+}
+
+.admin-list th.num {
+  text-align: right;
+}
+
+/* The history of the registry: a row for each file, and what one holds. */
+.admin-list .history-actions {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.admin-list .history-actions > * {
+  margin-left: 8px;
+}
+
+.admin-list td.history-view {
+  padding: 8px 16px 16px 32px;
+}
+
+.history-change {
+  margin: 4px 0 8px;
 }
 
 .admin-foot {
@@ -721,8 +748,8 @@ ol {
 
 .type-counts {
   list-style: none;
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
   gap: 8px 18px;
   margin-top: 16px;
 }

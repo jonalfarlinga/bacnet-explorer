@@ -209,6 +209,10 @@ type Status struct {
 	Open    bool   `json:"open"`
 	Summary string `json:"summary,omitempty"`
 	Lines   []Fact `json:"lines,omitempty"`
+	// Background is what the source is doing on its own, for the admin to
+	// follow: a sweep for devices, say, with when it started and where it
+	// has got to.
+	Background []Fact `json:"background,omitempty"`
 }
 
 // Event is something a source learned, or the registry passing it on.
@@ -300,4 +304,7 @@ var (
 	ErrUnknownNode  = errors.New("no such node")
 	ErrUnknownKind  = errors.New("no such source")
 	ErrNotOpen      = errors.New("the source is not open")
+
+	ErrNoStore         = errors.New("the explorer runs without a store")
+	ErrUnknownRegistry = errors.New("no such registry file")
 )

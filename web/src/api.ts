@@ -97,6 +97,8 @@ export interface SourceStatus {
   open: boolean
   summary?: string
   lines?: Fact[]
+  // What the source is doing on its own, for the admin page.
+  background?: Fact[]
 }
 
 export interface Source {
@@ -128,6 +130,20 @@ export interface StoreInfo {
   dir: string
   latest?: string
   registries: number
+}
+
+// One registry file: the registry in force, or one of the history.
+export interface RegistryInfo {
+  name: string
+  written: string
+  inForce: boolean
+  devices: number
+  tracked: number
+  sidelined: number
+}
+
+export interface RegistryFile extends RegistryInfo {
+  nodes: Node[]
 }
 
 async function request<T>(path: string, body?: unknown, method?: string): Promise<T> {
@@ -164,5 +180,8 @@ export const api = {
   store: () => request<StoreInfo>('/api/store'),
   classify: (ids: NodeID[], track: Track) => request<Node[]>('/api/classify', { ids, track }),
   remove: (ids: NodeID[]) => request<void>('/api/remove', { ids }),
+  registries: () => request<RegistryInfo[]>('/api/registries'),
+  registry: (name: string) => request<RegistryFile>(`/api/registry?name=${encodeURIComponent(name)}`),
+  restoreRegistry: (name: string) => request<{ name: string }>('/api/registry/restore', { name }),
   walk: () => request<WalkStatus>('/api/walk'),
 }

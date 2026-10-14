@@ -230,20 +230,132 @@ func (r *Registry) Classify(ids []NodeID, track Track) ([]Node, error) {
 		out = append(out, n.Node)
 		r.publish(Event{Type: "node", Data: n.Node})
 	}
-	if r.store != nil {
-		var keep []Node
-		for id, n := range r.nodes {
-			if r.inRegistry[id] {
-				keep = append(keep, n.Node)
-			}
-		}
-		sortNodes(keep)
-		if _, err := r.store.WriteRegistry(keep); err != nil {
-			return nil, err
-		}
-		r.markDirty()
+	if _, err := r.writeRegistry(); err != nil {
+		return nil, err
 	}
 	return out, nil
+}
+
+// writeRegistry writes the registry file anew, with every decision as it
+// now stands, and returns its name. Without a store it does nothing. The
+// caller holds r.mu.
+func (r *Registry) writeRegistry() (string, error) {
+	if r.store == nil {
+		return "", nil
+	}
+	var keep []Node
+	for id, n := range r.nodes {
+		if r.inRegistry[id] {
+			keep = append(keep, n.Node)
+		}
+	}
+	sortNodes(keep)
+	name, err := r.store.WriteRegistry(keep)
+	if err != nil {
+		return "", err
+	}
+	r.markDirty()
+	return name, nil
+}
+
+// Registries describes every registry file, the latest first: the one in
+// force, and the history behind it.
+func (r *Registry) Registries() ([]RegistryInfo, error) {
+	r.mu.Lock()
+	st := r.store
+	r.mu.Unlock()
+	if st == nil {
+		return nil, ErrNoStore
+	}
+	return st.Registries()
+}
+
+// RegistryFile reads one registry file, for the admin to look at.
+func (r *Registry) RegistryFile(name string) (RegistryFile, error) {
+	r.mu.Lock()
+	st := r.store
+	r.mu.Unlock()
+	if st == nil {
+		return RegistryFile{}, ErrNoStore
+	}
+	return st.ReadRegistry(name)
+}
+
+// RestoreRegistry puts a registry file of the history back in force: its
+// decisions are the decisions again. A point decided about since, and not
+// in the file, is new again; a point removed since comes back, unreached.
+// What is known of a node now is kept; only the decision is taken from the
+// file. No file is changed: what is restored is written as a new registry
+// file, whose name is returned, so the history keeps the registry it
+// replaced.
+func (r *Registry) RestoreRegistry(name string) (string, error) {
+	r.mu.Lock()
+	st := r.store
+	r.mu.Unlock()
+	if st == nil {
+		return "", ErrNoStore
+	}
+	file, err := st.ReadRegistry(name)
+	if err != nil {
+		return "", err
+	}
+	if file.InForce {
+		return name, nil
+	}
+
+	r.mu.Lock()
+	inFile := make(map[NodeID]bool, len(file.Nodes))
+	for _, n := range file.Nodes {
+		inFile[n.ID] = true
+	}
+	for id := range r.inRegistry {
+		if n := r.nodes[id]; n != nil && n.Kind == KindPoint && !inFile[id] {
+			n.Track = TrackNew
+			r.publish(Event{Type: "node", Data: n.Node})
+		}
+	}
+	r.inRegistry = make(map[NodeID]bool, len(file.Nodes))
+	// The nodes that come back, for their sources.
+	back := map[string][]Node{}
+	for _, n := range file.Nodes {
+		kind, _, _ := strings.Cut(string(n.ID), ":")
+		r.inRegistry[n.ID] = true
+		known := r.nodes[n.ID]
+		switch {
+		case known == nil:
+			r.upsert(kind, n, false)
+			known = r.nodes[n.ID]
+			back[kind] = append(back[kind], known.Node)
+		case n.Kind == KindPoint && n.Track != "" && n.Track != known.Track:
+			known.Track = n.Track
+		default:
+			continue
+		}
+		r.publish(Event{Type: "node", Data: known.Node})
+	}
+	written, err := r.writeRegistry()
+	type handing struct {
+		e     *entry
+		nodes []Node
+	}
+	var hand []handing
+	for kind, nodes := range back {
+		if e := r.sources[kind]; e != nil && e.open {
+			hand = append(hand, handing{e, nodes})
+		}
+	}
+	r.mu.Unlock()
+	if err != nil {
+		return "", err
+	}
+
+	for _, h := range hand {
+		sortNodes(h.nodes)
+		if err := h.e.src.Restore(h.e.ctx, h.nodes); err != nil {
+			return written, err
+		}
+	}
+	return written, nil
 }
 
 // ---- sources ---------------------------------------------------------------
@@ -578,20 +690,8 @@ func (r *Registry) Remove(ids []NodeID) error {
 		delete(r.inRegistry, id)
 		r.publish(Event{Type: "remove", Data: id})
 	}
-	if r.store != nil {
-		var keep []Node
-		for id, n := range r.nodes {
-			if r.inRegistry[id] {
-				keep = append(keep, n.Node)
-			}
-		}
-		sortNodes(keep)
-		if _, err := r.store.WriteRegistry(keep); err != nil {
-			return err
-		}
-		r.markDirty()
-	}
-	return nil
+	_, err := r.writeRegistry()
+	return err
 }
 
 // Detail reads everything behind a node, now. The node need not have been

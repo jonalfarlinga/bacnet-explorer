@@ -30,7 +30,7 @@ const DefaultSweepPerSec = 10
 // opening gives the Who-Is first, so that a device that announces itself is
 // not listed as one that did not.
 const (
-	sweepProgressEvery = 5 * time.Second
+	sweepProgressEvery = 2 * time.Second
 	sweepUnnamedShown  = 8
 	sweepSettle        = 10 * time.Second
 )
@@ -245,6 +245,9 @@ type sweepRun struct {
 	took    time.Duration // zero while it runs
 	total   int           // addresses to try
 	tried   int
+	// at is the address tried most recently: where the sweep has got to,
+	// or where it ended.
+	at netip.Addr
 	// listed is the addresses left alone because a device is listed there
 	// already, heard in this run or kept in the store from an earlier one.
 	listed int
@@ -258,9 +261,17 @@ type sweepRun struct {
 }
 
 func (r sweepRun) String() string {
-	text := fmt.Sprintf("%d of %d addresses tried", r.tried, r.total)
-	if r.took > 0 {
-		text = fmt.Sprintf("%s, %d addresses in %s", r.started.Format("2 Jan 15:04"), r.tried, r.took.Round(time.Second))
+	text := "started " + r.started.Format("2 Jan 15:04:05")
+	if r.took == 0 {
+		if r.at.IsValid() {
+			text += ", now at " + r.at.String()
+		}
+		text += fmt.Sprintf(", %d of %d addresses tried", r.tried, r.total)
+	} else {
+		if r.at.IsValid() {
+			text += ", last address " + r.at.String()
+		}
+		text += fmt.Sprintf(", %d addresses in %s", r.tried, r.took.Round(time.Second))
 		if r.stopped {
 			text += ", cut short"
 		}
@@ -305,7 +316,9 @@ type sweeper struct {
 	last    *sweepRun
 }
 
-// lines is what the source's status says of the sweep. listed reports
+// lines is what the source's status says of the sweep: its ranges, when
+// the running one started and the address it has got to, when the next one
+// starts, and how the last one went. listed reports
 // whether a device is listed at an address: one that would not say which
 // device it is, and has since been heard from, is no longer named.
 func (w *sweeper) lines(listed func(netip.AddrPort) bool) []explorer.Fact {
@@ -432,6 +445,9 @@ func (s *Source) sweepOnce(ctx context.Context, c *client.Client, w *sweeper) {
 		case <-ctx.Done():
 			return false
 		}
+		w.mu.Lock()
+		w.running.at = addr.Addr()
+		w.mu.Unlock()
 		knocks.Add(1)
 		go func() {
 			defer knocks.Done()

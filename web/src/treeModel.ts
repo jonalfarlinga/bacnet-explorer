@@ -27,7 +27,9 @@ export interface TreeInput {
   filter: string
 }
 
-function matcher(filter: string): ((...fields: (string | number | undefined)[]) => boolean) | null {
+// matcher turns what was typed into a test of a row's fields: every word
+// has to be in one of them. It is null when nothing was typed.
+export function matcher(filter: string): ((...fields: (string | number | undefined)[]) => boolean) | null {
   const terms = filter.toLowerCase().split(/\s+/).filter(Boolean)
   if (terms.length === 0) return null
   return (...fields) => {

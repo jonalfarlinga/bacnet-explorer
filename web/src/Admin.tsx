@@ -1,9 +1,10 @@
 import { useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, type Node, type NodeID, type Track } from './api'
+import { History } from './History'
 import type { Nodes } from './live'
 import { plural } from './Tree'
-import { childrenOf } from './treeModel'
+import { childrenOf, matcher } from './treeModel'
 
 const tracks: { track: Track; label: string }[] = [
   { track: 'new', label: 'New' },
@@ -12,12 +13,14 @@ const tracks: { track: Track; label: string }[] = [
 ]
 
 // Admin lists the points by the decision taken about them, grouped by
-// device, and takes decisions in batch. Nothing here reads a device: it is
-// about what the data consumers get, not what the explorer shows.
+// device, and takes decisions in batch; its last tab is the history of the
+// registry. Nothing here reads a device: it is about what the data consumers
+// get, not what the explorer shows.
 export function Admin({ nodes, onClose }: { nodes: Nodes; onClose: () => void }) {
   const qc = useQueryClient()
-  const [tab, setTab] = useState<Track>('new')
+  const [tab, setTab] = useState<Track | 'history'>('new')
   const [picked, setPicked] = useState<ReadonlySet<NodeID>>(new Set())
+  const [filter, setFilter] = useState('')
   const store = useQuery({ queryKey: ['store'], queryFn: api.store, retry: false })
   const classify = useMutation({
     mutationFn: ({ ids, track }: { ids: NodeID[]; track: Track }) => api.classify(ids, track),
@@ -37,14 +40,23 @@ export function Admin({ nodes, onClose }: { nodes: Nodes; onClose: () => void })
     },
   })
   const walk = useQuery({ queryKey: ['walk'], queryFn: api.walk, refetchInterval: 5000 })
+  // What the open sources are doing on their own: a sweep, with when it
+  // started and the address it has got to. The event stream refreshes it.
+  const sources = useQuery({ queryKey: ['sources'], queryFn: api.sources })
+  const background = (sources.data ?? []).filter((s) => s.status.open).flatMap((s) => s.status.background ?? [])
 
   const children = useMemo(() => childrenOf(nodes), [nodes])
-  // The points of each device, by the device, for the tab's decision.
+  const match = useMemo(() => matcher(filter), [filter])
+  // The points of each device, by the device, for the tab's decision. The
+  // filter keeps a point on its own fields or its device's, so a device's
+  // name narrows the list to that device.
   const groups = useMemo(() => {
     const byDevice = new Map<NodeID, Node[]>()
     for (const n of nodes.values()) {
       if (n.kind !== 'point' || (n.track ?? 'new') !== tab) continue
       const dev = deviceOf(nodes, n)
+      const d = nodes.get(dev)
+      if (match && !match(n.label, n.sublabel, n.tag, n.group, n.reading?.text, d?.label, d?.sublabel, d?.meta)) continue
       const list = byDevice.get(dev) ?? []
       list.push(n)
       byDevice.set(dev, list)
@@ -52,7 +64,7 @@ export function Admin({ nodes, onClose }: { nodes: Nodes; onClose: () => void })
     return [...byDevice]
       .map(([dev, points]) => ({ device: nodes.get(dev), points: points.sort((a, b) => a.order - b.order) }))
       .sort((a, b) => (a.device?.label ?? '').localeCompare(b.device?.label ?? ''))
-  }, [nodes, tab])
+  }, [nodes, tab, match])
   const counts = useMemo(() => {
     const c = { new: 0, tracked: 0, sidelined: 0 }
     for (const n of nodes.values()) if (n.kind === 'point') c[n.track ?? 'new']++
@@ -79,30 +91,47 @@ export function Admin({ nodes, onClose }: { nodes: Nodes; onClose: () => void })
             {t.label} <span className="sub">{counts[t.track]}</span>
           </button>
         ))}
+        <button className={`tab${tab === 'history' ? ' active' : ''}`} onClick={() => setTab('history')}>
+          History {store.data && <span className="sub">{store.data.registries}</span>}
+        </button>
+        {tab !== 'history' && (
+          <input
+            className="filter"
+            type="search"
+            placeholder="Filter"
+            aria-label="Filter points"
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+          />
+        )}
         <span className="spacer" />
-        <span className="sub">{pickedShown.length > 0 ? `${pickedShown.length} picked` : 'Pick points, then decide'}</span>
-        <button className="button" onClick={() => toggle(shown, pickedShown.length !== shown.length)} disabled={shown.length === 0}>
-          {pickedShown.length === shown.length && shown.length > 0 ? 'Pick none' : 'Pick all'}
-        </button>
-        {tab !== 'tracked' && (
-          <button className="button primary" onClick={() => decide('tracked')} disabled={pickedShown.length === 0 || classify.isPending}>
-            Track
-          </button>
+        {tab !== 'history' && (
+          <>
+            <span className="sub">{pickedShown.length > 0 ? `${pickedShown.length} picked` : 'Pick points, then decide'}</span>
+            <button className="button" onClick={() => toggle(shown, pickedShown.length !== shown.length)} disabled={shown.length === 0}>
+              {pickedShown.length === shown.length && shown.length > 0 ? 'Pick none' : 'Pick all'}
+            </button>
+            {tab !== 'tracked' && (
+              <button className="button primary" onClick={() => decide('tracked')} disabled={pickedShown.length === 0 || classify.isPending}>
+                Track
+              </button>
+            )}
+            {tab !== 'sidelined' && (
+              <button className="button" onClick={() => decide('sidelined')} disabled={pickedShown.length === 0 || classify.isPending}>
+                Sideline
+              </button>
+            )}
+            <button
+              className={`button${armed ? ' danger' : ''}`}
+              onClick={() => (armed ? remove.mutate(pickedShown) : setArmed(true))}
+              onBlur={() => setArmed(false)}
+              disabled={pickedShown.length === 0 || remove.isPending}
+              title="Forget the picked points: for ones that have moved or are gone. A point the device still has comes back as new when the device is read."
+            >
+              {armed ? `Remove ${pickedShown.length}?` : 'Remove'}
+            </button>
+          </>
         )}
-        {tab !== 'sidelined' && (
-          <button className="button" onClick={() => decide('sidelined')} disabled={pickedShown.length === 0 || classify.isPending}>
-            Sideline
-          </button>
-        )}
-        <button
-          className={`button${armed ? ' danger' : ''}`}
-          onClick={() => (armed ? remove.mutate(pickedShown) : setArmed(true))}
-          onBlur={() => setArmed(false)}
-          disabled={pickedShown.length === 0 || remove.isPending}
-          title="Forget the picked points: for ones that have moved or are gone. A point the device still has comes back as new when the device is read."
-        >
-          {armed ? `Remove ${pickedShown.length}?` : 'Remove'}
-        </button>
         <button className="button" onClick={onClose}>
           Back
         </button>
@@ -112,9 +141,13 @@ export function Admin({ nodes, onClose }: { nodes: Nodes; onClose: () => void })
       {store.isError && <p className="banner error">The explorer runs without a store: decisions are not kept.</p>}
 
       <div className="admin-list">
-        {groups.length === 0 ? (
+        {tab === 'history' ? (
+          <History nodes={nodes} />
+        ) : groups.length === 0 ? (
           <p className="tree-empty sub">
-            {tab === 'new' ? 'No undecided points. Open devices in the explorer to find their points.' : `No ${tab} points.`}
+            {match && counts[tab] > 0
+              ? 'Nothing matches the filter.'
+              : tab === 'new' ? 'No undecided points. Open devices in the explorer to find their points.' : `No ${tab} points.`}
           </p>
         ) : (
           <table>
@@ -191,7 +224,7 @@ export function Admin({ nodes, onClose }: { nodes: Nodes; onClose: () => void })
       </div>
       <p className="admin-foot">
         {store.data
-          ? `Store ${store.data.dir}: ${store.data.latest ? `registry ${store.data.latest}` : 'no decision yet'}, ${plural(store.data.registries, 'registry file')}. Undecided points are in temp.json; each decision writes a new registry file.`
+          ? `Store ${store.data.dir}: ${store.data.latest ? `registry ${store.data.latest}` : 'no decision yet'}, ${plural(store.data.registries, 'registry file')}. Undecided points are in temp.json; each decision writes a new registry file, and the History tab has them all.`
           : ''}
         <br />
         {walk.data && !walk.data.enabled && 'The background walk is off.'}
@@ -201,6 +234,12 @@ export function Admin({ nodes, onClose }: { nodes: Nodes; onClose: () => void })
               ? `reading ${walk.data.currentLabel}`
               : walk.data.waiting ?? 'idle'
           }; ${plural(walk.data.done, 'device')} walked this run, ${walk.data.due} due.${walk.data.lastError ? ` Last error: ${walk.data.lastError}` : ''}`}
+        {background.map((f) => (
+          <span key={f.label}>
+            <br />
+            {f.label}: {f.value}
+          </span>
+        ))}
       </p>
     </main>
   )
