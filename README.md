@@ -44,9 +44,9 @@ given to **Add by address** or `-add` means the program's port.
     # Browse the bacnet-shifter running on this machine, with its consumer side on 127.0.0.1:47809.
     $ go run . -interface 127.0.0.1 -port 47809
 
-Until the library's v0.4.0 is tagged, `go.mod` builds against a checkout of the library in the directory
-beside this one (`../bacnet`), through a `replace` directive. Once it is tagged, drop the directive and
-`go get github.com/jonalfarlinga/bacnet@v0.4.0`.
+`go.mod` pins release v0.4.0 of the library. To build against a local checkout while changing the library,
+point a `replace` directive at it (`go mod edit -replace github.com/jonalfarlinga/bacnet=../bacnet`) and
+drop it again before committing.
 
 A device that no Who-Is reaches, because it is on another IP subnet or does not announce itself, can be
 listed by its address instead: **Add by address** in the header takes an IP (with `:port` when it is not
