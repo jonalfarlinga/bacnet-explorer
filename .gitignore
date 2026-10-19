@@ -17,3 +17,6 @@ web/dist/*
 
 # The explorer's store: what it found, and the admin's decisions.
 data/
+
+# What the subnet survey writes, when run from here.
+survey_*.csv

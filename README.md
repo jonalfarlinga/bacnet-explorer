@@ -115,6 +115,40 @@ costs an ARP broadcast: tell whoever watches the network before giving it ranges
 where devices can be. It finds BACnet/IP devices only: when one of them is a router, the devices behind it
 are not listed by the sweep.
 
+### Surveying a subnet before adding a device
+`cmd/survey` is a separate program for the question the sweep does not answer: where on an adapter's subnet
+a new device can go. It tries every address of the subnet as the sweep does, one ReadProperty each after a
+broadcast Who-Is, and writes a CSV with a row per address (`-csv`, or `survey_<datetime>.csv` in the current
+directory): its status, `bacnet`, `host`, `vacant`, `unrouted` or `silent`, what that rests on, and for a
+BACnet device its instance, name, vendor and model, and the networks it routes if it is a router. The
+terminal gets the devices and the counts, since a subnet's worth of rows is more than it can show.
+
+    $ go run ./cmd/survey -interface "Ethernet 3"
+    $ go run ./cmd/survey -interface "Ethernet 3" -range 192.168.1.20-192.168.1.60
+
+On the adapter's own subnet, a vacant address is one that no BACnet device answered for and that the
+operating system could not resolve by ARP either: sending to an address on the subnet makes the system look
+its MAC up, which a host answers whether or not it answers a ping, and the survey reads the neighbor table
+(`arp -a`, or `/proc/net/arp` on Linux) while it runs and once more at the end. Without `-range` the survey
+covers that subnet, or the /16 around the adapter's address when the subnet is larger.
+
+`-range` can also name addresses beyond the subnet, on a network the adapter reaches through a router,
+where ARP says nothing. There the survey pings each address as well, through the ICMP API on Windows,
+which needs no administrator, and the `ping` command elsewhere. A reply is a host. A router's answer that
+the host is unreachable means it looked and found nobody, so the address is vacant, and the survey names the
+router that vouched for it; an answer that the network is unreachable is listed as unrouted. An address that
+answers nothing at all is listed as silent, not vacant: routers can be set to keep quiet about absent hosts,
+and a host can ignore pings and BACnet both. Beyond the subnet the addresses ending in .0 and .255 are left
+out, as the sweep leaves them out.
+
+    $ go run ./cmd/survey -interface "Ethernet 3" -range 10.117.0.1-10.117.255.254 -rate 50
+
+`-rate`, `-timeout` and `-port` are as the explorer's; a whole /16 takes two hours at the default rate, and
+the survey says how long it expects when it starts. Ctrl-C ends it early and prints what it found so far. It
+sends from the devices' port on the adapter so that it hears I-Ams, and from a port of its own when that one
+is in use, by the explorer say, in which case I-Ams broadcast to the devices' port are not heard and it says
+so. Like the sweep, it looks like a port scan to the network.
+
 ### Routers, BBMDs and diagnostics
 When a device that should answer does not appear, run with `-log debug`: it prints every I-Am heard and every
 datagram dropped, with the reason, so you can tell a device that never answered from one whose answer was
@@ -150,6 +184,7 @@ passes `/api` on to the explorer.
 | `internal/source/bacnet` | The BACnet/IP source: discovery, add-by-address, the daily sweep, how a device's objects and properties are read, and how values are rendered |
 | `internal/api` | The HTTP API and the event stream the UI listens to: sources and nodes, nothing protocol-shaped |
 | `web` | The UI: a tree of nodes and a detail pane, drawn from what the sources describe |
+| `cmd/survey`, `internal/survey` | The subnet survey: a program of its own, on the library's client, that lists the BACnet devices, other hosts and vacant addresses of a subnet |
 
 The simulated devices behind `-sim`, which the tests also use, are the library's `client/sim` package.
 
